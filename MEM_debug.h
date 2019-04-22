@@ -49,6 +49,9 @@ void mem_debug_check(const char* file, const int line, const char* user_msg = NU
 // Same as MEM_DEBUG_CHECK_MSG but displays results for memory allocated by the calling thread only.
 #define MEM_DEBUG_THREAD_CHECK(msg) mem_debug::mem_debug_check(__FILE__, __LINE__, msg, true);
 
+// Integrity check on a single pointer
+void mem_debug_check_ptr(void* ptr);
+
 // Clear records of allocated memory, to prepare for a leak test.
 // is_global defines scope of operation, true for process-wide, false for current thread's allocations only.
 void mem_debug_clear_leak_list(bool is_global = false);
@@ -66,6 +69,7 @@ uint64_t mem_debug_total_alloced_bytes(bool include_padding = false);
 
 #else
 static inline void mem_debug_check(const char* file, const int line, const char* user_msg = NULL, const bool this_thread_only = false) {}
+static inline void mem_debug_check_ptr(void* ptr) {}
 static inline void mem_debug_clear_leak_list(bool is_global = false) {}
 static inline bool mem_debug_show_leak_list(bool is_global = false) { return false; }
 static inline void mem_debug_abort_on_allocation(unsigned int serial_num, bool is_global = false) {}
@@ -89,12 +93,14 @@ void mem_debug_check(const char* file, const int line, const char* user_msg, con
 #define MEM_DEBUG_CHECK mem_debug_check(__FILE__, __LINE__, NULL, MD_FALSE);
 #define MEM_DEBUG_CHECK_MSG(msg) mem_debug_check(__FILE__, __LINE__, msg, MD_FALSE);
 #define MEM_DEBUG_THREAD_CHECK(msg) mem_debug_check(__FILE__, __LINE__, msg, 1);
+void mem_debug_check_ptr(void* ptr);
 void mem_debug_clear_leak_list(int bool_is_global);
 int mem_debug_show_leak_list(int bool_is_global);
 void mem_debug_abort_on_allocation(unsigned int serial_num, int bool_is_global);
 uint64_t mem_debug_total_alloced_bytes(int bool_include_padding);
 #else
 static inline void mem_debug_check(const char* file, const int line, const char* user_msg, const int bool_this_thread_only) {}
+static inline void mem_debug_check_ptr(void* ptr) {}
 static inline void mem_debug_clear_leak_list(int bool_is_global) {}
 static inline int mem_debug_show_leak_list(int bool_is_global) { return MD_FALSE; }
 static inline void mem_debug_abort_on_allocation(unsigned int serial_num, int bool_is_global) {}

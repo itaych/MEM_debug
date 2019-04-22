@@ -64,7 +64,7 @@ freely, subject to the following restrictions:
 #include <sys/time.h>
 #include <sys/syscall.h>
 
-#define MEM_DEBUG_VERSION "1.0.0"
+#define MEM_DEBUG_VERSION "1.0.1"
 
 // Optimize an 'if' for the most likely case
 #ifdef __GNUC__
@@ -135,10 +135,12 @@ static __thread uint32_t alloc_thread_serial_num = 0; // serial number of next a
 static uint32_t abort_on_global_serial_num = INVALID_SERIAL;
 static __thread uint32_t abort_on_thread_serial_num = INVALID_SERIAL;
 
-// compare memory to constant byte.
+// compare memory to constant byte. returns true iff all bytes in memory are equal to val.
 // by stackoverflow user mihaif. http://stackoverflow.com/a/28563801/3779334
 static inline bool memvcmp(const void *memory, const unsigned char val, const unsigned int size)
 {
+	if (!size)
+		return true;
 	const unsigned char *mm = (const unsigned char*)memory;
 	return (*mm == val) && (memcmp(mm, mm + 1, size - 1) == 0);
 }
@@ -200,6 +202,35 @@ static long int get_thread_id()
 	if (UNLIKELY(thread_id == -1))
 		thread_id = syscall(SYS_gettid);
 	return thread_id;
+}
+
+// Get thread and timestamp from memory header and create human readable output.
+#define TIME2STR_SZ 100
+static __thread char hdr_info_output[TIME2STR_SZ];
+static char* hdr_info(const struct mem_hdr* hdr, bool show_extra_info = true) {
+	struct tm currtime;
+
+	// convert mem TS to string
+	localtime_r(&hdr->timestamp.tv_sec, &currtime); // local time
+	char ts_str[TIME2STR_SZ];
+	strftime(ts_str, TIME2STR_SZ, "%b %e %X.", &currtime);
+
+	// generate output
+	snprintf(hdr_info_output, TIME2STR_SZ, "Allocated at %s%03d by thread %d",
+			ts_str, (int)(hdr->timestamp.tv_usec/1000), (int)hdr->allocator_thread);
+
+	if (show_extra_info) // add info on current time and thread.
+	{
+		// convert current time to string
+		timeval now_ts;
+		gettimeofday(&now_ts, NULL);
+		localtime_r(&now_ts.tv_sec, &currtime); // local time
+		strftime(ts_str, TIME2STR_SZ, "%b %e %X.", &currtime);
+		// add to output
+		snprintf(hdr_info_output+strlen(hdr_info_output), TIME2STR_SZ, " (Now: %s%03d thread %d)",
+				ts_str, (int)(now_ts.tv_usec/1000), (int)get_thread_id());
+	}
+	return hdr_info_output;
 }
 
 // Critical section mutex.
@@ -601,26 +632,33 @@ void mem_debug_check(const char* file, const int line, const char* user_msg, con
 		uint8_t* orig_alloc = p_addr_offset + sizeof(void**);
 		if (*(mem_hdr**)p_addr_offset != m)
 		{
-			MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "bad pointer to header (possible write before allocation) - %p (header %p)\n", file, line, user_msg, orig_alloc, m);
-			__FREE_MUTEX_THROW_ERROR__;
+			mutex_unlock(); // for hdr_info
+			MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "bad pointer to header (possible write before allocation) - %p (header %p) %s\n", file, line, user_msg, orig_alloc, m, hdr_info(m));
+			__THROW_ERROR__;
 		}
 
-		uint8_t* prefix = (uint8_t*)m;
-		if (!memvcmp(prefix+sizeof(mem_hdr), PAD_CHAR, m->prefix_addr_offset-sizeof(mem_hdr)))
+		// test padding for overwrites, but skip if we're only checking our own thread's allocations and this one was by a different thread
+		if (!this_thread_only || (this_thread_only && m->allocator_thread == thread_id))
 		{
-			MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "write before allocation - %p (header %p)\n", file, line, user_msg, orig_alloc, m);
-			__FREE_MUTEX_THROW_ERROR__;
-		}
-		if (!memvcmp(prefix+m->suffix_offset, PAD_CHAR, m->total_alloc_size-m->suffix_offset))
-		{
-			MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "write after allocation - %p (header %p)\n", file, line, user_msg, orig_alloc, m);
-			__FREE_MUTEX_THROW_ERROR__;
-		}
+			uint8_t* prefix = (uint8_t*)m;
+			if (!memvcmp(prefix+sizeof(mem_hdr), PAD_CHAR, m->prefix_addr_offset-sizeof(mem_hdr)))
+			{
+				mutex_unlock();
+				MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "write before allocation - %p (header %p) %s\n", file, line, user_msg, orig_alloc, m, hdr_info(m));
+				__THROW_ERROR__;
+			}
+			if (!memvcmp(prefix+m->suffix_offset, PAD_CHAR, m->total_alloc_size-m->suffix_offset))
+			{
+				mutex_unlock();
+				MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "write after allocation - %p (header %p) %s\n", file, line, user_msg, orig_alloc, m, hdr_info(m));
+				__THROW_ERROR__;
+			}
 
-		if (this_thread_only && m->allocator_thread == thread_id)
-		{
-			num_allocs_thread++;
-			total_bytes_alloced_thread += m->requested_size;
+			if (this_thread_only)
+			{
+				num_allocs_thread++;
+				total_bytes_alloced_thread += m->requested_size;
+			}
 		}
 
 		num_allocs++;
@@ -645,6 +683,60 @@ void mem_debug_check(const char* file, const int line, const char* user_msg, con
 		MD_LOG_WARNING("%s:%d%s%s: Mem check OK, %d allocs, %llu bytes (padded %llu)\n",
 				file, line, user_msg_prefix, user_msg,
 				num_allocs, (unsigned long long)global_bytes_alloced, (unsigned long long)global_bytes_alloced_w_padding);
+	}
+}
+
+// check validity of a single pointer (this code is very similar to the checks performed in 'free')
+void mem_debug_check_ptr(void* __ptr)
+{
+#define MEM_DEBUG_CHK_PTR_PFX "%p: error: "
+	bool err = false;
+
+	// Find pointer to prefix just below the user buffer.
+	void** prefix_addr = ((void**)__ptr) - 1;
+	uint8_t* prefix = (uint8_t*)*prefix_addr;
+
+	// make sure prefix address is valid. It must be no further from the user's buffer than the prefix size plus the highest alignment requested.
+	int64_t difftest = (uint8_t*)__ptr - prefix;
+	if (difftest < (int64_t)(PREFIX_SIZE_ACTUAL + sizeof(mem_hdr)) || difftest > (int64_t)(PREFIX_SIZE_ACTUAL + sizeof(mem_hdr) + max_align))
+	{
+		MD_LOG_ERROR(MEM_DEBUG_CHK_PTR_PFX "prefix broken (invalid pointer or write before allocation)\n", __ptr);
+		__THROW_ERROR__;
+	}
+
+	// Assume we have a mem_hdr struct at the start of the prefix.
+	mem_hdr* m = (mem_hdr*)prefix;
+
+	// All valid allocations must have a magic number here.
+	if (m->magic_num != MAGIC_NUM)
+	{
+		if (m->magic_num == MAGIC_NUM_DELETED)
+			MD_LOG_ERROR(MEM_DEBUG_CHK_PTR_PFX "memory is freed\n", __ptr);
+		else
+			MD_LOG_ERROR(MEM_DEBUG_CHK_PTR_PFX "bad magic\n", __ptr);
+		err = true;
+	}
+
+	// make sure prefix pointer in header is correct
+	else if (prefix + m->prefix_addr_offset != (uint8_t*)prefix_addr)
+	{
+		MD_LOG_ERROR(MEM_DEBUG_CHK_PTR_PFX "corrupted header (prefix ptr bad)\n", __ptr);
+		err = true;
+	}
+
+	if (err)
+		__THROW_ERROR__;
+
+	// make sure prefix and suffix padding bytes are intact.
+	if (!memvcmp(prefix+sizeof(mem_hdr), PAD_CHAR, m->prefix_addr_offset-sizeof(mem_hdr)))
+	{
+		MD_LOG_ERROR(MEM_DEBUG_CHK_PTR_PFX "write before memory\n", __ptr);
+		__THROW_ERROR__;
+	}
+	if (!memvcmp(prefix+m->suffix_offset, PAD_CHAR, m->total_alloc_size-m->suffix_offset))
+	{
+		MD_LOG_ERROR(MEM_DEBUG_CHK_PTR_PFX "write after memory\n", __ptr);
+		__THROW_ERROR__;
 	}
 }
 
@@ -777,6 +869,11 @@ void mem_debug_check(const char* file, const int line, const char* user_msg, con
 	mem_debug::mem_debug_check(file, line, user_msg, (bool)bool_this_thread_only);
 }
 
+void mem_debug_check_ptr(void* ptr)
+{
+	mem_debug::mem_debug_check_ptr(ptr);
+}
+
 void mem_debug_clear_leak_list(int bool_is_global)
 {
 	mem_debug::mem_debug_clear_leak_list((bool)bool_is_global);
@@ -800,4 +897,3 @@ uint64_t mem_debug_total_alloced_bytes(int bool_include_padding)
 }
 
 #endif // MEM_DEBUG_ENABLE
-

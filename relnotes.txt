@@ -1,5 +1,11 @@
 MEM_debug Release Notes
 -----------------------
+v1.0.1, 20151210
+----------------
+* Added mem_debug_check_ptr function.
+* MEM_DEBUG_THREAD_CHECK did not behave as advertised.
+* Bugfix: Possible errors if prefix or suffix size were set to zero.
+
 v1.0.0, 20151128
 ----------------
 * Initial release
