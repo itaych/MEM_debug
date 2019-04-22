@@ -1,5 +1,10 @@
 MEM_debug Release Notes
 -----------------------
+v1.0.3, 20170927
+----------------
+* mem_debug_total_alloced_bytes adds option to return peak amount of memory allocated.
+* output errors occurring during heap operations to stderr, not stdout.
+
 v1.0.2, 20170314
 ----------------
 * Changed mem_debug_check_ptr to accept const pointers.
