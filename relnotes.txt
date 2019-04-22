@@ -1,5 +1,11 @@
 MEM_debug Release Notes
 -----------------------
+v1.0.5, 20181220
+----------------
+* mem_debug_clear_leak_list now optionally restarts allocation serial numbers from 0. When looking for a leak this is helpful for finding patterns in leaking allocations.
+* mem_debug_abort_on_allocation now accepts an optional size parameter. If used, abort will only occur if both serial number and allocation size match the request.
+* fixed a bug where mem_debug_total_alloced_bytes would return wrong values for thread-scope memory usage, in case memory allocated by this thread has been freed by a different thread.
+
 v1.0.4, 20181007
 ----------------
 * added is_global option to mem_debug_total_alloced_bytes to allow checking memory usage of the current thread.

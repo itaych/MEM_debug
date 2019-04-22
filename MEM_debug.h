@@ -1,7 +1,7 @@
 /*
 MEM_debug, a heap corruption and memory leak detector.
 
-Copyright (c)2017 Itay Chamiel, itaych@gmail.com
+Copyright (c)2019 Itay Chamiel, itaych@gmail.com
 
 This software is provided 'as-is', without any express or implied
 warranty. In no event will the authors be held liable for any damages
@@ -55,15 +55,16 @@ void mem_debug_check_ptr(const void* ptr);
 
 // Clear records of allocated memory, to prepare for a leak test.
 // is_global defines scope of operation, true for process-wide, false for current thread's allocations only.
-void mem_debug_clear_leak_list(bool is_global = false);
+// restart_serial_nums also resets all (process/thread) allocations' serial numbers, and restarts assignment from 0.
+void mem_debug_clear_leak_list(bool is_global = false, bool restart_serial_nums = false);
 
 // Display all memory buffers allocated since the last clear_leak_list (or program start).
 // is_global=true to display all process's allocs, false to display current thread's only.
 // returns false if no leaks detected, true if leaks detected.
 bool mem_debug_show_leak_list(bool is_global = false);
 
-// Cause mem_debug to abort the program on a specific allocation (defined by serial number), global or in current thread.
-void mem_debug_abort_on_allocation(unsigned int serial_num, bool is_global = false);
+// Cause mem_debug to abort the program on a specific allocation (defined by serial number), optionally only if equal to a specific size, global or in current thread.
+void mem_debug_abort_on_allocation(unsigned int serial_num, unsigned int size = 0, bool is_global = false);
 
 // Returns total amount of bytes currently allocated by program (with or without extra padding allocated by mem_debug).
 // Setting get_peak to true will return the respective current peak value.
@@ -73,9 +74,9 @@ uint64_t mem_debug_total_alloced_bytes(bool include_padding = false, bool get_pe
 #else
 static inline void mem_debug_check(const char* file, const int line, const char* user_msg = NULL, const bool this_thread_only = false) {}
 static inline void mem_debug_check_ptr(const void* ptr) {}
-static inline void mem_debug_clear_leak_list(bool is_global = false) {}
+static inline void mem_debug_clear_leak_list(bool is_global = false, bool restart_serial_nums = false) {}
 static inline bool mem_debug_show_leak_list(bool is_global = false) { return false; }
-static inline void mem_debug_abort_on_allocation(unsigned int serial_num, bool is_global = false) {}
+static inline void mem_debug_abort_on_allocation(unsigned int serial_num, unsigned int size = -1, bool is_global = false) {}
 static inline uint64_t mem_debug_total_alloced_bytes(bool include_padding = false, bool get_peak = false, bool is_global = true) { return 0; }
 #define MEM_DEBUG_CHECK
 #define MEM_DEBUG_CHECK_MSG(msg)
@@ -97,16 +98,16 @@ void mem_debug_check(const char* file, const int line, const char* user_msg, con
 #define MEM_DEBUG_CHECK_MSG(msg) mem_debug_check(__FILE__, __LINE__, msg, MD_FALSE);
 #define MEM_DEBUG_THREAD_CHECK(msg) mem_debug_check(__FILE__, __LINE__, msg, MD_TRUE);
 void mem_debug_check_ptr(const void* ptr);
-void mem_debug_clear_leak_list(int bool_is_global);
+void mem_debug_clear_leak_list(int bool_is_global, int bool_restart_serial_nums);
 int mem_debug_show_leak_list(int bool_is_global);
-void mem_debug_abort_on_allocation(unsigned int serial_num, int bool_is_global);
-uint64_t mem_debug_total_alloced_bytes(int bool_include_padding, int get_peak);
+void mem_debug_abort_on_allocation(unsigned int serial_num, unsigned int size, int bool_is_global);
+uint64_t mem_debug_total_alloced_bytes(int bool_include_padding, int get_peak, int is_global);
 #else
 static inline void mem_debug_check(const char* file, const int line, const char* user_msg, const int bool_this_thread_only) {}
 static inline void mem_debug_check_ptr(const void* ptr) {}
-static inline void mem_debug_clear_leak_list(int bool_is_global) {}
+static inline void mem_debug_clear_leak_list(int bool_is_global, int bool_restart_serial_nums) {}
 static inline int mem_debug_show_leak_list(int bool_is_global) { return MD_FALSE; }
-static inline void mem_debug_abort_on_allocation(unsigned int serial_num, int bool_is_global) {}
+static inline void mem_debug_abort_on_allocation(unsigned int serial_num, unsigned int size, int bool_is_global) {}
 static inline uint64_t mem_debug_total_alloced_bytes(int bool_include_padding, int get_peak, int is_global) { return 0; }
 #define MEM_DEBUG_CHECK
 #define MEM_DEBUG_CHECK_MSG(msg)

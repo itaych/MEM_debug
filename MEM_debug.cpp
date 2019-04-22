@@ -1,7 +1,7 @@
 /*
 MEM_debug, a heap corruption and memory leak detector.
 
-Copyright (c)2017 Itay Chamiel, itaych@gmail.com
+Copyright (c)2018 Itay Chamiel, itaych@gmail.com
 
 This software is provided 'as-is', without any express or implied
 warranty. In no event will the authors be held liable for any damages
@@ -64,7 +64,7 @@ freely, subject to the following restrictions:
 #include <sys/time.h>
 #include <sys/syscall.h>
 
-#define MEM_DEBUG_VERSION "1.0.4"
+#define MEM_DEBUG_VERSION "1.0.5"
 
 // Optimize an 'if' for the most likely case
 #ifdef __GNUC__
@@ -105,12 +105,16 @@ struct mem_hdr {
 	uint32_t serial_num_per_thread;
 	bool leak_detect_flag;
 	long int allocator_thread;
+	uint64_t* thread_bytes_alloced_ptr; // when freeing, decrease value at this pointer (can't directly change thread_bytes_alloced because memory may be freed from different thread than allocation).
+	uint64_t* thread_bytes_alloced_w_padding_ptr; // same as above
 	timeval timestamp;
 	uint32_t checksum; // ensures struct has not been modified
 
 	uint32_t calc_checksum() { return (unsigned long)prev + (unsigned long)next
 			+ prefix_addr_offset + suffix_offset + total_alloc_size + requested_size
-			+ serial_num + serial_num_per_thread + allocator_thread; }
+			+ serial_num + serial_num_per_thread + allocator_thread
+			+ (unsigned long)thread_bytes_alloced_ptr + (unsigned long)thread_bytes_alloced_w_padding_ptr
+			+ timestamp.tv_sec + timestamp.tv_usec; }
 };
 
 // Headers are connected as a doubly-linked list. This is the head node.
@@ -134,7 +138,9 @@ static __thread uint32_t alloc_thread_serial_num = 0; // serial number of next a
 // allow aborting on a specific memory allocation number
 #define INVALID_SERIAL ((uint32_t)-1)
 static uint32_t abort_on_global_serial_num = INVALID_SERIAL;
+static unsigned int abort_on_size_global = 0;
 static __thread uint32_t abort_on_thread_serial_num = INVALID_SERIAL;
+static __thread unsigned int abort_on_size_thread = 0;
 
 // Dummy object that announces memory checker at startup and runs final check at shutdown.
 struct MemDebugInfo {
@@ -226,8 +232,8 @@ static char* hdr_info(const struct mem_hdr* hdr, bool show_extra_info = false) {
 	strftime(ts_str, TIME2STR_SZ, "%b %e %X.", &currtime);
 
 	// generate output
-	snprintf(hdr_info_output, TIME2STR_SZ, "Allocated at %s%03d by thread %d",
-			ts_str, (int)(hdr->timestamp.tv_usec/1000), (int)hdr->allocator_thread);
+	snprintf(hdr_info_output, TIME2STR_SZ, "Allocated at %s%03d by thread %d size %u",
+			ts_str, (int)(hdr->timestamp.tv_usec/1000), (int)hdr->allocator_thread, hdr->requested_size);
 
 	if (show_extra_info) { // add info on current time and thread.
 		// convert current time to string
@@ -353,8 +359,8 @@ static int mem_debug_posix_memalign(void **memptr, size_t alignment, size_t size
 	gettimeofday(&m->timestamp, NULL);
 
 	// abort if we've reached a user requested serial number.
-	if ((abort_on_global_serial_num != INVALID_SERIAL && m->serial_num == abort_on_global_serial_num) ||
-			(abort_on_thread_serial_num != INVALID_SERIAL && m->serial_num_per_thread == abort_on_thread_serial_num)) {
+	if ((abort_on_global_serial_num != INVALID_SERIAL && m->serial_num == abort_on_global_serial_num && (abort_on_size_global == 0 || abort_on_size_global == size)) ||
+		(abort_on_thread_serial_num != INVALID_SERIAL && m->serial_num_per_thread == abort_on_thread_serial_num && (abort_on_size_thread == 0 || abort_on_size_thread == size))) {
 		safe_print_with_val(MALLOC_PFX "reached requested allocation number, size ", size, ", aborting\n");
 		__THROW_ERROR__;
 	}
@@ -377,7 +383,6 @@ static int mem_debug_posix_memalign(void **memptr, size_t alignment, size_t size
 	m->next = first_node;
 	mem_hdr_base.next = m;
 	m->prev = &mem_hdr_base;
-	m->checksum = m->calc_checksum();
 
 	global_bytes_alloced += size;
 	global_bytes_alloced_w_padding += total_alloc_size;
@@ -386,12 +391,15 @@ static int mem_debug_posix_memalign(void **memptr, size_t alignment, size_t size
 		global_bytes_alloced_w_padding_max = global_bytes_alloced_w_padding;
 	}
 	thread_bytes_alloced += size;
+	m->thread_bytes_alloced_ptr = &thread_bytes_alloced; // thread_bytes_alloced is a thread-specific variable. When freeing, reduce value of the correct one.
 	thread_bytes_alloced_w_padding += total_alloc_size;
+	m->thread_bytes_alloced_w_padding_ptr = &thread_bytes_alloced_w_padding;
 	if (thread_bytes_alloced > thread_bytes_alloced_max) {
 		thread_bytes_alloced_max = thread_bytes_alloced;
 		thread_bytes_alloced_w_padding_max = thread_bytes_alloced_w_padding;
 	}
 
+	m->checksum = m->calc_checksum();
 	num_global_allocs++;
 	mutex_unlock();
 
@@ -463,8 +471,8 @@ void free(void *__ptr) throw() {
 		}
 		global_bytes_alloced -= m->requested_size;
 		global_bytes_alloced_w_padding -= m->total_alloc_size;
-		thread_bytes_alloced -= m->requested_size;
-		thread_bytes_alloced_w_padding -= m->total_alloc_size;
+		*(m->thread_bytes_alloced_ptr) -= m->requested_size;
+		*(m->thread_bytes_alloced_w_padding_ptr) -= m->total_alloc_size;
 		num_global_allocs--;
 	}
 
@@ -729,16 +737,35 @@ void mem_debug_check_ptr(const void* __ptr) {
 
 // Before performing a memory leak check, clear 'leak' flag from all allocations.
 // is_global defines whether we clear all or only allocations performed by this thread.
-void mem_debug_clear_leak_list(bool is_global) {
+// restart_serial_nums also resets all allocations' serial numbers, and restarts assignment from 0.
+void mem_debug_clear_leak_list(bool is_global, bool restart_serial_nums) {
 	MD_LOG_INFO("Clearing leak table%s.\n", is_global? "":" (this thread only)");
 
 	mutex_lock();
 	mem_hdr* m = mem_hdr_base.next;
 
 	while (m) {
-		if (is_global || m->allocator_thread == get_thread_id())
-			m->leak_detect_flag = false;
+		if (is_global || m->allocator_thread == get_thread_id()) {
+			m->leak_detect_flag = false; // note that leak_detect_flag is not counted in checksum
+			if (restart_serial_nums) {
+				if (is_global) {
+					m->serial_num = INVALID_SERIAL;
+				}
+				else {
+					m->serial_num_per_thread = INVALID_SERIAL;
+				}
+				m->checksum = m->calc_checksum();
+			}
+		}
 		m = m->next;
+	}
+	if (restart_serial_nums) {
+		if (is_global) {
+			alloc_serial_num = 0;
+		}
+		else {
+			alloc_thread_serial_num = 0;
+		}
 	}
 	mutex_unlock();
 }
@@ -826,12 +853,14 @@ bool mem_debug_show_leak_list(bool is_global) {
 	return leaks_detected;
 }
 
-void mem_debug_abort_on_allocation(unsigned int serial_num, bool is_global) {
+void mem_debug_abort_on_allocation(unsigned int serial_num, unsigned int size, bool is_global) {
 	if (is_global) {
 		abort_on_global_serial_num = serial_num;
+		abort_on_size_global = size;
 	}
 	else {
 		abort_on_thread_serial_num = serial_num;
+		abort_on_size_thread = size;
 	}
 }
 
@@ -868,16 +897,16 @@ void mem_debug_check_ptr(const void* ptr) {
 	mem_debug::mem_debug_check_ptr(ptr);
 }
 
-void mem_debug_clear_leak_list(int bool_is_global) {
-	mem_debug::mem_debug_clear_leak_list((bool)bool_is_global);
+void mem_debug_clear_leak_list(int bool_is_global, int bool_restart_serial_nums) {
+	mem_debug::mem_debug_clear_leak_list((bool)bool_is_global, (bool)bool_restart_serial_nums);
 }
 
 int mem_debug_show_leak_list(int bool_is_global) {
 	return (int)mem_debug::mem_debug_show_leak_list((bool)bool_is_global);
 }
 
-void mem_debug_abort_on_allocation(unsigned int serial_num, int bool_is_global) {
-	mem_debug::mem_debug_abort_on_allocation(serial_num, (bool)bool_is_global);
+void mem_debug_abort_on_allocation(unsigned int serial_num, unsigned int size, int bool_is_global) {
+	mem_debug::mem_debug_abort_on_allocation(serial_num, size, (bool)bool_is_global);
 }
 
 uint64_t mem_debug_total_alloced_bytes(int bool_include_padding, int get_peak, int is_global) {
