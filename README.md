@@ -2,12 +2,12 @@
 ## Welcome to MEM_debug
 MEM_debug is a simple, effective and easy to use heap corruption and memory leak detector. By dropping a single source file into your project you will immediately be able to catch out of bounds writes, double or invalid frees, and information on allocated memory that wasn’t freed. If you suspect a memory corruption bug, a simple API allows you to perform more specific checks during runtime to pinpoint its location. The impact on program performance is minimal.
 
-MEM_debug is not the answer to every problem. There are far more exhaustive solutions but each have their disadvantages: [Valgrind](http://valgrind.org/) is an excellent tool but slows down the program by an order of magnitude, making it unsuitable for real time systems or cases where a problem only appears after a long execution time. [Dmalloc](http://dmalloc.com/) is far more featured but is quite complicated to use.
+MEM_debug is not the answer to every problem. There are far more exhaustive solutions but each has its disadvantages: [Valgrind](http://valgrind.org/) is an excellent tool but slows down the program by an order of magnitude, making it unsuitable for real time systems or cases where a problem only appears after a long execution time. Other systems such as [Dmalloc](http://dmalloc.com/) are certainly more featured but are often complicated to use.
 ## Platforms
 MEM_debug has been tested on C and C++ projects compiled with GCC under Linux, targeting both Intel and ARM processors.
 I’m not sure about other platforms and compilers but glibc is a minimum requirement due to the method used to intercept heap management calls. I’ve had no luck with MacOS or MinGW.
 
-MS Visual Studio offers similar debugging capabilities in its CRT library (see [here](https://docs.microsoft.com/en-us/visualstudio/debugger/crt-debug-heap-details?view=vs-2015) and [here](https://docs.microsoft.com/en-us/visualstudio/debugger/finding-memory-leaks-using-the-crt-library?view=vs-2015)), so this tool wouldn’t be of much help there anyway.
+For Windows developers, MS Visual Studio offers similar debugging capabilities in its CRT library (see [here](https://docs.microsoft.com/en-us/visualstudio/debugger/crt-debug-heap-details?view=vs-2015) and [here](https://docs.microsoft.com/en-us/visualstudio/debugger/finding-memory-leaks-using-the-crt-library?view=vs-2015)), so this tool wouldn’t be of much help there anyway.
 
 If anyone manages to use MEM_debug on a new platform (perhaps with minor modifications) please let me know.
 ## Setup
