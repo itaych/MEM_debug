@@ -1,7 +1,7 @@
 /*
 MEM_debug, a heap corruption and memory leak detector.
 
-Copyright (c)2015 Itay Chamiel, itaych@gmail.com
+Copyright (c)2017 Itay Chamiel, itaych@gmail.com
 
 This software is provided 'as-is', without any express or implied
 warranty. In no event will the authors be held liable for any damages
@@ -64,7 +64,7 @@ freely, subject to the following restrictions:
 #include <sys/time.h>
 #include <sys/syscall.h>
 
-#define MEM_DEBUG_VERSION "1.0.1"
+#define MEM_DEBUG_VERSION "1.0.2"
 
 // Optimize an 'if' for the most likely case
 #ifdef __GNUC__
@@ -687,17 +687,17 @@ void mem_debug_check(const char* file, const int line, const char* user_msg, con
 }
 
 // check validity of a single pointer (this code is very similar to the checks performed in 'free')
-void mem_debug_check_ptr(void* __ptr)
+void mem_debug_check_ptr(const void* __ptr)
 {
 #define MEM_DEBUG_CHK_PTR_PFX "%p: error: "
 	bool err = false;
 
 	// Find pointer to prefix just below the user buffer.
-	void** prefix_addr = ((void**)__ptr) - 1;
-	uint8_t* prefix = (uint8_t*)*prefix_addr;
+	const void** prefix_addr = ((const void**)__ptr) - 1;
+	const uint8_t* prefix = (const uint8_t*)*prefix_addr;
 
 	// make sure prefix address is valid. It must be no further from the user's buffer than the prefix size plus the highest alignment requested.
-	int64_t difftest = (uint8_t*)__ptr - prefix;
+	const int64_t difftest = (const uint8_t*)__ptr - prefix;
 	if (difftest < (int64_t)(PREFIX_SIZE_ACTUAL + sizeof(mem_hdr)) || difftest > (int64_t)(PREFIX_SIZE_ACTUAL + sizeof(mem_hdr) + max_align))
 	{
 		MD_LOG_ERROR(MEM_DEBUG_CHK_PTR_PFX "prefix broken (invalid pointer or write before allocation)\n", __ptr);
@@ -869,7 +869,7 @@ void mem_debug_check(const char* file, const int line, const char* user_msg, con
 	mem_debug::mem_debug_check(file, line, user_msg, (bool)bool_this_thread_only);
 }
 
-void mem_debug_check_ptr(void* ptr)
+void mem_debug_check_ptr(const void* ptr)
 {
 	mem_debug::mem_debug_check_ptr(ptr);
 }

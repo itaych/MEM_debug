@@ -1,5 +1,9 @@
 MEM_debug Release Notes
 -----------------------
+v1.0.2, 20170314
+----------------
+* Changed mem_debug_check_ptr to accept const pointers.
+
 v1.0.1, 20151210
 ----------------
 * Added mem_debug_check_ptr function.
