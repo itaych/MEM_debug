@@ -1,5 +1,9 @@
 MEM_debug Release Notes
 -----------------------
+v1.0.7, 20190423
+----------------
+* simplified mem_debug_check.
+
 v1.0.6, 20190415
 ----------------
 * fixed "mutex recursion error" message that appeared occasionally. It was caused by access to a thread local counter after the thread had exited. Per-thread statistics now require c++11.

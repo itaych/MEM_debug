@@ -14,7 +14,7 @@ freely, subject to the following restrictions:
     1. The origin of this software must not be misrepresented; you must not
     claim that you wrote the original software. If you use this software
     in a product or in the course of product development, an acknowledgment
-	in the product documentation would be appreciated but is not required.
+    in the product documentation would be appreciated but is not required.
 
     2. Altered source versions must be plainly marked as such, and must not be
     misrepresented as being the original software.
@@ -670,31 +670,8 @@ void mem_debug_check(const char* file, const int line, const char* user_msg, con
 			__THROW_ERROR__;
 		}
 		if (m->prev != prev_m) {
-			// broken linked list! scan broken part of chain backwards to see where it leads
-			safe_print_string("broken linked list, attempting reverse search\n");
-			mem_hdr* m_rev = m->prev;
-			mem_hdr* m_rev_prev = m_rev->next;
-			int cnt = 0;
-			while (m_rev) {
-				if (m_rev->next != m_rev_prev) {
-					mutex_unlock();
-					MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "broken linked list %p - %p after %d nodes\n", file, line, user_msg, prev_m, m, num_allocs);
-					MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "reverse search breaks at %p - %p after %d nodes\n", file, line, user_msg, m_rev, m_rev_prev, cnt);
-					__THROW_ERROR__;
-				}
-				m_rev_prev = m_rev;
-				m_rev = m_rev->prev;
-				cnt++;
-			}
-			// backwards search reached a null pointer
 			mutex_unlock();
-			MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "broken linked list %p - %p after %d nodes\n", file, line, user_msg, prev_m, m, num_allocs);
-			if (m_rev_prev == &mem_hdr_base) {
-				MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "reverse search reached list head after %d nodes\n", file, line, user_msg, cnt);
-			}
-			else {
-				MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "reverse search reached null prev at %p after %d nodes\n", file, line, user_msg, m_rev_prev, cnt);
-			}
+			MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "broken linked list - %p points back to %p but expected %p after %d nodes\n", file, line, user_msg, m, m->prev, prev_m, num_allocs);
 			__THROW_ERROR__;
 		}
 		uint8_t* p_addr_offset = (uint8_t*)m + m->prefix_addr_offset;
@@ -706,7 +683,7 @@ void mem_debug_check(const char* file, const int line, const char* user_msg, con
 		}
 
 		// test padding for overwrites, but skip if we're only checking our own thread's allocations and this one was by a different thread
-		if (!this_thread_only || (this_thread_only && m->allocator_thread == thread_id)) {
+		if (!this_thread_only || m->allocator_thread == thread_id) {
 			uint8_t* prefix = (uint8_t*)m;
 			if (!memvcmp(prefix+sizeof(mem_hdr), PAD_CHAR, m->prefix_addr_offset-sizeof(mem_hdr))) {
 				mutex_unlock();
