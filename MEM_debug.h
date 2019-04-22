@@ -68,7 +68,7 @@ void mem_debug_abort_on_allocation(unsigned int serial_num, unsigned int size = 
 
 // Returns total amount of bytes currently allocated by program (with or without extra padding allocated by mem_debug).
 // Setting get_peak to true will return the respective current peak value.
-// Setting is_global to false will return information pertaining to current thread only.
+// Setting is_global to false will return information pertaining to current thread only (this feature requires c++11, 0 will be returned otherwise).
 uint64_t mem_debug_total_alloced_bytes(bool include_padding = false, bool get_peak = false, bool is_global = true);
 
 #else

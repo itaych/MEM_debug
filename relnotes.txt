@@ -1,5 +1,12 @@
 MEM_debug Release Notes
 -----------------------
+v1.0.6, 20190415
+----------------
+* fixed "mutex recursion error" message that appeared occasionally. It was caused by access to a thread local counter after the thread had exited. Per-thread statistics now require c++11.
+* added global count of total malloc/free calls, printed at program exit summary.
+* nicer output of mem_debug_show_leak_list, quoted string buffers now have whitespaces escaped.
+* MD_LOG_* macros (for calling an external logger, or printf by default) are no longer called from a critical section, so they may allocate memory if desired.
+
 v1.0.5, 20181220
 ----------------
 * mem_debug_clear_leak_list now optionally restarts allocation serial numbers from 0. When looking for a leak this is helpful for finding patterns in leaking allocations.
