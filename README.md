@@ -7,7 +7,7 @@ MEM_debug is not the answer to every problem. There are far more exhaustive solu
 MEM_debug has been tested on C and C++ projects compiled with GCC under Linux, targeting both Intel and ARM processors.
 I’m not sure about other platforms and compilers but glibc is a minimum requirement due to the method used to intercept heap management calls. I’ve had no luck with MacOS or MinGW.
 
-MS Visual Studio offers similar debugging capabilities in its CRT library, so this tool wouldn’t be of much help there anyway.
+MS Visual Studio offers similar debugging capabilities in its CRT library (see [here](https://docs.microsoft.com/en-us/visualstudio/debugger/crt-debug-heap-details?view=vs-2015) and [here](https://docs.microsoft.com/en-us/visualstudio/debugger/finding-memory-leaks-using-the-crt-library?view=vs-2015)), so this tool wouldn’t be of much help there anyway.
 
 If anyone manages to use MEM_debug on a new platform (perhaps with minor modifications) please let me know.
 ## Setup
