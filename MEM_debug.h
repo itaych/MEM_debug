@@ -67,7 +67,8 @@ void mem_debug_abort_on_allocation(unsigned int serial_num, bool is_global = fal
 
 // Returns total amount of bytes currently allocated by program (with or without extra padding allocated by mem_debug).
 // Setting get_peak to true will return the respective current peak value.
-uint64_t mem_debug_total_alloced_bytes(bool include_padding = false, bool get_peak = false);
+// Setting is_global to false will return information pertaining to current thread only.
+uint64_t mem_debug_total_alloced_bytes(bool include_padding = false, bool get_peak = false, bool is_global = true);
 
 #else
 static inline void mem_debug_check(const char* file, const int line, const char* user_msg = NULL, const bool this_thread_only = false) {}
@@ -75,7 +76,7 @@ static inline void mem_debug_check_ptr(const void* ptr) {}
 static inline void mem_debug_clear_leak_list(bool is_global = false) {}
 static inline bool mem_debug_show_leak_list(bool is_global = false) { return false; }
 static inline void mem_debug_abort_on_allocation(unsigned int serial_num, bool is_global = false) {}
-static inline uint64_t mem_debug_total_alloced_bytes(bool include_padding = false, bool get_peak = false) { return 0; }
+static inline uint64_t mem_debug_total_alloced_bytes(bool include_padding = false, bool get_peak = false, bool is_global = true) { return 0; }
 #define MEM_DEBUG_CHECK
 #define MEM_DEBUG_CHECK_MSG(msg)
 #define MEM_DEBUG_THREAD_CHECK(msg)
@@ -106,7 +107,7 @@ static inline void mem_debug_check_ptr(const void* ptr) {}
 static inline void mem_debug_clear_leak_list(int bool_is_global) {}
 static inline int mem_debug_show_leak_list(int bool_is_global) { return MD_FALSE; }
 static inline void mem_debug_abort_on_allocation(unsigned int serial_num, int bool_is_global) {}
-static inline uint64_t mem_debug_total_alloced_bytes(int bool_include_padding, int get_peak) { return 0; }
+static inline uint64_t mem_debug_total_alloced_bytes(int bool_include_padding, int get_peak, int is_global) { return 0; }
 #define MEM_DEBUG_CHECK
 #define MEM_DEBUG_CHECK_MSG(msg)
 #define MEM_DEBUG_THREAD_CHECK(msg)

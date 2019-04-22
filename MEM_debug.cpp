@@ -64,7 +64,7 @@ freely, subject to the following restrictions:
 #include <sys/time.h>
 #include <sys/syscall.h>
 
-#define MEM_DEBUG_VERSION "1.0.3"
+#define MEM_DEBUG_VERSION "1.0.4"
 
 // Optimize an 'if' for the most likely case
 #ifdef __GNUC__
@@ -77,7 +77,7 @@ freely, subject to the following restrictions:
 
 // This is called when an error is found and we want to kill the program.
 #define __THROW_ERROR__ do { raise(SIGSEGV); } while(0) /* Crash the program. */
-#define __FREE_MUTEX_THROW_ERROR__ do { pthread_mutex_unlock(&alloc_mutex); __THROW_ERROR__; } while(0)
+#define __FREE_MUTEX_THROW_ERROR__ do { if (is_mutex_owned) { pthread_mutex_unlock(&alloc_mutex); is_mutex_owned = false; } __THROW_ERROR__; } while(0)
 
 // rounds up to any power of 2
 #define ROUND_UP(value, round_to) (((value) + (round_to - 1)) & ~(round_to - 1))
@@ -121,6 +121,12 @@ static uint64_t global_bytes_alloced = 0; // total memory allocated (by user, no
 static uint64_t global_bytes_alloced_w_padding = 0; // total memory allocated (including paddings)
 static uint64_t global_bytes_alloced_max = 0; // peak total memory allocated (not including padding)
 static uint64_t global_bytes_alloced_w_padding_max = 0; // peak total memory allocated (including padding)
+// same as global_bytes_alloced, but for each thread separately
+static __thread uint64_t thread_bytes_alloced = 0; // thread memory allocated (by user, not including padding by mem_debug)
+static __thread uint64_t thread_bytes_alloced_w_padding = 0; // thread memory allocated (including paddings)
+static __thread uint64_t thread_bytes_alloced_max = 0; // peak thread memory allocated (not including padding)
+static __thread uint64_t thread_bytes_alloced_w_padding_max = 0; // peak thread memory allocated (including padding)
+
 static size_t max_align = 0; // highest alignment request seen.
 static uint32_t alloc_serial_num = 0; // serial number of next allocation (process-wide)
 static __thread uint32_t alloc_thread_serial_num = 0; // serial number of next allocation (per thread)
@@ -350,7 +356,7 @@ static int mem_debug_posix_memalign(void **memptr, size_t alignment, size_t size
 	if ((abort_on_global_serial_num != INVALID_SERIAL && m->serial_num == abort_on_global_serial_num) ||
 			(abort_on_thread_serial_num != INVALID_SERIAL && m->serial_num_per_thread == abort_on_thread_serial_num)) {
 		safe_print_with_val(MALLOC_PFX "reached requested allocation number, size ", size, ", aborting\n");
-			__THROW_ERROR__;
+		__THROW_ERROR__;
 	}
 
 #ifndef MEM_DEBUG_FILL_ALLOCED_MEMORY
@@ -379,6 +385,13 @@ static int mem_debug_posix_memalign(void **memptr, size_t alignment, size_t size
 		global_bytes_alloced_max = global_bytes_alloced;
 		global_bytes_alloced_w_padding_max = global_bytes_alloced_w_padding;
 	}
+	thread_bytes_alloced += size;
+	thread_bytes_alloced_w_padding += total_alloc_size;
+	if (thread_bytes_alloced > thread_bytes_alloced_max) {
+		thread_bytes_alloced_max = thread_bytes_alloced;
+		thread_bytes_alloced_w_padding_max = thread_bytes_alloced_w_padding;
+	}
+
 	num_global_allocs++;
 	mutex_unlock();
 
@@ -450,6 +463,8 @@ void free(void *__ptr) throw() {
 		}
 		global_bytes_alloced -= m->requested_size;
 		global_bytes_alloced_w_padding -= m->total_alloc_size;
+		thread_bytes_alloced -= m->requested_size;
+		thread_bytes_alloced_w_padding -= m->total_alloc_size;
 		num_global_allocs--;
 	}
 
@@ -733,8 +748,8 @@ void mem_debug_clear_leak_list(bool is_global) {
 // returns false if no leaks detected, true if leaks detected.
 bool mem_debug_show_leak_list(bool is_global) {
 #define CONTENT_DUMP_MAX_SIZE 64
-#define MAX_OUT_STR 1024
-	char out_str[MAX_OUT_STR];
+#define MAX_OUT_STR 1023
+	char out_str[MAX_OUT_STR+1]; // extra byte for terminating EOL
 
 	mutex_lock();
 	mem_hdr* m = mem_hdr_base.next;
@@ -794,7 +809,12 @@ bool mem_debug_show_leak_list(bool is_global) {
 				}
 			}
 
-			MD_LOG_INFO("%s\n", out_str);
+			// in case of a long string out_str_o may pass MAX_OUT_STR. Find true length of output string and add a terminating EOL.
+			out_str_o = strlen(out_str);
+			out_str[out_str_o] = '\n';
+			out_str[out_str_o+1] = '\0'; // this is never beyond the edge of the array (it is defined as MAX_OUT_STR+1)
+			// output the string. Do not use MD_LOG_INFO as string may be long and cause an internal reallocation.
+			safe_print_string(out_str);
 		}
 		m = m->next;
 	}
@@ -815,12 +835,22 @@ void mem_debug_abort_on_allocation(unsigned int serial_num, bool is_global) {
 	}
 }
 
-uint64_t mem_debug_total_alloced_bytes(bool include_padding, bool get_peak) {
-	if (get_peak) {
-		return (include_padding? global_bytes_alloced_w_padding_max : global_bytes_alloced_max);
+uint64_t mem_debug_total_alloced_bytes(bool include_padding, bool get_peak, bool is_global) {
+	if (is_global) {
+		if (get_peak) {
+			return (include_padding? global_bytes_alloced_w_padding_max : global_bytes_alloced_max);
+		}
+		else {
+			return (include_padding? global_bytes_alloced_w_padding : global_bytes_alloced);
+		}
 	}
 	else {
-		return (include_padding? global_bytes_alloced_w_padding : global_bytes_alloced);
+		if (get_peak) {
+			return (include_padding? thread_bytes_alloced_w_padding_max : thread_bytes_alloced_max);
+		}
+		else {
+			return (include_padding? thread_bytes_alloced_w_padding : thread_bytes_alloced);
+		}
 	}
 }
 
@@ -850,8 +880,8 @@ void mem_debug_abort_on_allocation(unsigned int serial_num, int bool_is_global) 
 	mem_debug::mem_debug_abort_on_allocation(serial_num, (bool)bool_is_global);
 }
 
-uint64_t mem_debug_total_alloced_bytes(int bool_include_padding, int get_peak) {
-	return mem_debug::mem_debug_total_alloced_bytes((bool)bool_include_padding, (bool)get_peak);
+uint64_t mem_debug_total_alloced_bytes(int bool_include_padding, int get_peak, int is_global) {
+	return mem_debug::mem_debug_total_alloced_bytes((bool)bool_include_padding, (bool)get_peak, (bool)is_global);
 }
 
 }

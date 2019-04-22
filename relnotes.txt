@@ -1,5 +1,10 @@
 MEM_debug Release Notes
 -----------------------
+v1.0.4, 20181007
+----------------
+* added is_global option to mem_debug_total_alloced_bytes to allow checking memory usage of the current thread.
+* in mem_debug_show_leak_list, usage of FLOG with a very long line could cause a memory allocation when the mem_debug mutex is locked. Use safe_print_string instead for displaying memory leak details.
+
 v1.0.3, 20170927
 ----------------
 * mem_debug_total_alloced_bytes adds option to return peak amount of memory allocated.
