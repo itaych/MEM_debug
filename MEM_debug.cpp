@@ -1,0 +1,803 @@
+/*
+MEM_debug, a heap corruption and memory leak detector.
+
+Copyright (c)2015 Itay Chamiel, itaych@gmail.com
+
+This software is provided 'as-is', without any express or implied
+warranty. In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+    1. The origin of this software must not be misrepresented; you must not
+    claim that you wrote the original software. If you use this software
+    in a product or in the course of product development, an acknowledgment
+	in the product documentation would be appreciated but is not required.
+
+    2. Altered source versions must be plainly marked as such, and must not be
+    misrepresented as being the original software.
+
+    3. This notice may not be removed or altered from any source distribution.
+*/
+
+// Here are some user modifiable settings.
+
+// Uncomment to enable filling of all allocated memory with a fixed value. This is useful to catch use of uninitialized data. Causes an additional performance hit.
+//#define MEM_DEBUG_FILL_ALLOCED_MEMORY
+// Uncomment to enable filling of all freed memory with a fixed value. This is useful to catch use of freed data. Causes an additional performance hit.
+//#define MEM_DEBUG_FILL_FREED_MEMORY
+// Size of padding before and after each allocation, for catching out of bounds writes. They can be any value from 0 up. Performance and memory
+// use are affected because these pads are filled when allocating and tested when freeing.
+// Note that these values are guaranteed minimums but the actual padding sizes may be slightly higher.
+#define PREFIX_SIZE 32
+#define SUFFIX_SIZE 32
+// All padding is filled with this byte
+#define PAD_CHAR 0xda
+// If MEM_DEBUG_FILL_FREED_MEMORY is defined, fill freed memory with this value
+#define PAD_FREEMEM_CHAR 0xcd
+// Fail on any single allocation request larger than this size. This catches unintentional huge allocations but increase this value if desired.
+#define MAX_ALLOC 0x18000000 // 384 MB
+// By default, diagnostic functions output messages using printf, but if you use some framework that supports log levels you may
+// employ it by changing these defines. Note that when these log functions are called the heap mutex may be locked, therefore these
+// functions must not attempt to allocate or free memory.
+#define MD_LOG_INFO printf
+#define MD_LOG_WARNING printf
+#define MD_LOG_ERROR printf
+
+// End of user defines.
+
+#include "MEM_debug.h"
+
+#ifdef MEM_DEBUG_ENABLE
+
+#pragma message "Memory debugger ENABLED"
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <stdint.h>
+#include <signal.h>
+#include <sys/time.h>
+#include <sys/syscall.h>
+
+#define MEM_DEBUG_VERSION "1.0.0"
+
+// Optimize an 'if' for the most likely case
+#ifdef __GNUC__
+#define LIKELY(x)		__builtin_expect(!!(x), 1)
+#define UNLIKELY(x)		__builtin_expect(!!(x), 0)
+#else
+#define LIKELY(x) x
+#define UNLIKELY(x) x
+#endif
+
+// This is called when an error is found and we want to kill the program.
+#define __THROW_ERROR__ do { raise(SIGSEGV); } while(0) /* Crash the program. */
+#define __FREE_MUTEX_THROW_ERROR__ do { pthread_mutex_unlock(&alloc_mutex); __THROW_ERROR__; } while(0)
+
+// rounds up to any power of 2
+#define ROUND_UP(value, round_to) (((value) + (round_to - 1)) & ~(round_to - 1))
+
+// these are aliases to the original glibc malloc/free functions.
+extern "C" void *__libc_malloc(size_t size);
+extern "C" void __libc_free(void *__ptr);
+// extern "C" void *__libc_memalign (size_t alignment, size_t size);
+
+// Dummy object that announces memory checker at startup and runs final check at shutdown.
+struct MemDebugInfo {
+	MemDebugInfo() { printf("** (%d) MEM_debug " MEM_DEBUG_VERSION " is active.\n", getpid()); }
+	~MemDebugInfo() { mem_debug::mem_debug_check(__FILE__, __LINE__, "- At shutdown"); }
+};
+static MemDebugInfo memdebuginfo;
+
+// magic numbers to ensure an allocation is real
+#define MAGIC_NUM 0x1ee76502
+#define MAGIC_NUM_DELETED 0xdeadbeef
+
+// A header added to each allocated memory block
+struct mem_hdr {
+	uint32_t magic_num;
+	mem_hdr* prev;
+	mem_hdr* next;
+	uint32_t prefix_addr_offset;
+	uint32_t suffix_offset;
+	uint32_t total_alloc_size;
+	uint32_t requested_size;
+	// statistics
+	uint32_t serial_num;
+	uint32_t serial_num_per_thread;
+	bool leak_detect_flag;
+	long int allocator_thread;
+	timeval timestamp;
+	uint32_t checksum; // ensures struct has not been modified
+
+	uint32_t calc_checksum() { return (unsigned long)prev + (unsigned long)next
+			+ prefix_addr_offset + suffix_offset + total_alloc_size + requested_size
+			+ serial_num + serial_num_per_thread + allocator_thread; }
+};
+
+// Headers are connected as a doubly-linked list. This is the head node.
+static mem_hdr mem_hdr_base = {0, NULL, NULL, 0, 0, 0, 0};
+// bookkeeping
+static int num_global_allocs = 0; // amount of blocks currently allocated.
+static uint64_t global_bytes_alloced = 0; // total memory allocated (by user, not including padding by mem_debug)
+static uint64_t global_bytes_alloced_w_padding = 0; // total memory allocated (including paddings)
+static size_t max_align = 0; // highest alignment request seen.
+static uint32_t alloc_serial_num = 0; // serial number of next allocation (process-wide)
+static __thread uint32_t alloc_thread_serial_num = 0; // serial number of next allocation (per thread)
+
+// allow aborting on a specific memory allocation number
+#define INVALID_SERIAL ((uint32_t)-1)
+static uint32_t abort_on_global_serial_num = INVALID_SERIAL;
+static __thread uint32_t abort_on_thread_serial_num = INVALID_SERIAL;
+
+// compare memory to constant byte.
+// by stackoverflow user mihaif. http://stackoverflow.com/a/28563801/3779334
+static inline bool memvcmp(const void *memory, const unsigned char val, const unsigned int size)
+{
+	const unsigned char *mm = (const unsigned char*)memory;
+	return (*mm == val) && (memcmp(mm, mm + 1, size - 1) == 0);
+}
+
+// a version of 'write' that ignores the return value (we don't expect errors when writing to stdout).
+static inline void void_write (int __fd, __const void *__buf, size_t __n)
+{
+	size_t ret = write(__fd, __buf, __n);
+	((void)ret);
+}
+
+// some 'safe' print functions, so we don't call printf within alloc/free
+static void safe_print_string(const char* str, const int fd = STDOUT_FILENO)
+{
+	const char* str_p = str;
+	while (*str_p)
+		str_p++;
+	void_write(fd, str, str_p-str);
+}
+
+static void safe_print_hex(uint64_t val, const int fd = STDOUT_FILENO)
+{
+	safe_print_string("0x");
+	if (val == 0)
+		safe_print_string("0");
+	else
+	{
+		int digs_remaining = 16;
+		while(!(val & 0xf000000000000000ull))
+		{
+			val <<= 4;
+			digs_remaining--;
+		}
+		while (digs_remaining)
+		{
+			char hex_digit = ((val & 0xf000000000000000ull) >> (64-4)) & 0xf;
+			if (hex_digit < 0xa)
+				hex_digit += '0';
+			else
+				hex_digit += 'a' - 0xa;
+			void_write(fd, &hex_digit, 1);
+			val <<= 4;
+			digs_remaining--;
+		}
+	}
+}
+
+static void safe_print_with_val(const char* str1, uint64_t val, const char* str2, const int fd = STDOUT_FILENO)
+{
+	safe_print_string(str1, fd);
+	safe_print_hex(val, fd);
+	safe_print_string(str2, fd);
+}
+
+// get thread ID (no more than once per thread)
+static long int get_thread_id()
+{
+	static __thread long int thread_id = -1;
+	if (UNLIKELY(thread_id == -1))
+		thread_id = syscall(SYS_gettid);
+	return thread_id;
+}
+
+// Critical section mutex.
+static pthread_mutex_t alloc_mutex;
+static bool is_alloc_mutex_inited = false;
+static __thread bool is_mutex_owned = false; // catch malloc recursions
+static inline void mutex_up()
+{
+	if (UNLIKELY(!is_alloc_mutex_inited))
+	{
+		pthread_mutex_init(&alloc_mutex, NULL);
+		is_alloc_mutex_inited = true;
+	}
+}
+static inline void mutex_lock()
+{
+	mutex_up();
+	if (UNLIKELY(is_mutex_owned))
+	{
+		safe_print_string("Mutex recursion error!\n");
+		is_mutex_owned = false;
+		__FREE_MUTEX_THROW_ERROR__;
+	}
+	pthread_mutex_lock(&alloc_mutex);
+	is_mutex_owned = true;
+}
+static inline void mutex_unlock()
+{
+	if (UNLIKELY(!is_mutex_owned))
+	{
+		safe_print_string("Mutex invalid unlock!\n");
+		__THROW_ERROR__;
+	}
+	pthread_mutex_unlock(&alloc_mutex);
+	is_mutex_owned = false;
+}
+
+// allocate aligned memory. Other allocators call this function.
+static int mem_debug_posix_memalign(void **memptr, size_t alignment, size_t size)
+{
+#define MALLOC_PFX "malloc: "
+	long int thread_id = get_thread_id();
+
+	if (UNLIKELY(size == 0)) // alloc(0) returns null
+	{
+		*memptr = NULL;
+		return 0;
+	}
+	if (alignment & (alignment-1)) // alignment not power of 2?
+	{
+		safe_print_with_val(MALLOC_PFX "bad align ", alignment, "\n");
+		__THROW_ERROR__;
+	}
+	const size_t MIN_ALIGNMENT = sizeof(void*) * 2; // minimum alignment, 8 bytes for 32-bit systems, 16 bytes for 64-bit.
+	if (alignment < MIN_ALIGNMENT)
+		alignment = MIN_ALIGNMENT;
+	if (alignment > max_align) // remember highest alignment request we've seen.
+		max_align = alignment;
+
+	if (size > MAX_ALLOC) // catch invalid allocation sizes
+	{
+		safe_print_string(MALLOC_PFX "bad alloc size ");
+		safe_print_hex(size);
+		safe_print_string(", max allowed ");
+		safe_print_hex(MAX_ALLOC);
+		safe_print_string("\n");
+		*memptr = NULL;
+		//__THROW_ERROR__;
+		return -1;
+	}
+
+	// We allocate buffers that look like this:
+	// [ mem_hdr struct | PREFIX_SIZE_ACTUAL bytes | alignment padding (if needed) | allocated buffer for user | SUFFIX_SIZE bytes ]
+	// Immediately below the user buffer we set a pointer to the prefix header. Since alignment padding and PREFIX_SIZE might both be zero,
+	// leaving no room for this pointer, we add sizeof(void*) to PREFIX_SIZE.
+	// Any space reserved for alignment padding but not actually used for padding, is added to the suffix.
+#define PREFIX_SIZE_ACTUAL (PREFIX_SIZE + sizeof(void*))
+	uint32_t total_alloc_size = sizeof(mem_hdr)+PREFIX_SIZE_ACTUAL+alignment+size+SUFFIX_SIZE;
+	// allocate using libc malloc
+	uint8_t* ptr = (uint8_t*)__libc_malloc(total_alloc_size);
+	if (!ptr) // allocation failure?
+	{
+		safe_print_string(MALLOC_PFX "__libc_malloc fail! Requested size ");
+		safe_print_hex(size);
+		safe_print_string(", total requested ");
+		safe_print_hex(total_alloc_size);
+		safe_print_string(", already alloced ");
+		safe_print_hex(global_bytes_alloced_w_padding);
+		safe_print_string("\n");
+		*memptr = NULL;
+		//__THROW_ERROR__;
+		return -1;
+	}
+#ifdef MEM_DEBUG_FILL_ALLOCED_MEMORY
+	memset(ptr, PAD_CHAR, total_alloc_size); // fill entire block with pad char
+#endif
+
+	uint8_t* prefix = (uint8_t*)ptr;
+	// push ptr to end of prefix
+	ptr = prefix + sizeof(mem_hdr) + PREFIX_SIZE_ACTUAL;
+	// round ptr up to requested alignment. This will be the returned allocated buffer.
+	uint64_t ptr_num = (uint64_t)ptr;
+	uint64_t ptr_num_rounded = ROUND_UP(ptr_num, alignment);
+	ptr = (uint8_t*)ptr_num_rounded;
+	// create a pointer, just below the allocated buffer, pointing to start of prefix.
+	void** ptr_write_prefix_addr = ((void**)ptr) - 1;
+	*ptr_write_prefix_addr = prefix;
+
+	// create a mem_hdr struct at start of prefix.
+	mem_hdr* m = (mem_hdr*)prefix;
+	m->magic_num = MAGIC_NUM;
+	m->prefix_addr_offset = (uint8_t*)ptr_write_prefix_addr - prefix; // offset to pointer at end of prefix
+	m->suffix_offset = (ptr+size) - prefix; // offset to start of suffix (end of user buffer)
+	m->total_alloc_size = total_alloc_size; // offset to end of suffix (end of entire allocated block)
+	m->requested_size = size; // remember user's requested size
+	m->serial_num = alloc_serial_num++;
+	m->serial_num_per_thread = alloc_thread_serial_num++;
+	m->leak_detect_flag = true;
+	m->allocator_thread = thread_id;
+	gettimeofday(&m->timestamp, NULL);
+
+	// abort if we've reached a user requested serial number.
+	if ((abort_on_global_serial_num != INVALID_SERIAL && m->serial_num == abort_on_global_serial_num) ||
+			(abort_on_thread_serial_num != INVALID_SERIAL && m->serial_num_per_thread == abort_on_thread_serial_num))
+	{
+		safe_print_with_val(MALLOC_PFX "reached requested allocation number, size ", size, ", aborting\n");
+			__THROW_ERROR__;
+	}
+
+#ifndef MEM_DEBUG_FILL_ALLOCED_MEMORY
+	// fill prefix from end of mem_hdr struct until prefix pointer.
+	memset(prefix+sizeof(mem_hdr), PAD_CHAR, m->prefix_addr_offset-sizeof(mem_hdr));
+	memset(prefix+m->suffix_offset, PAD_CHAR, m->total_alloc_size-m->suffix_offset);
+#endif
+
+	// manipulating linked list in a critical section.
+	mutex_lock();
+
+	// add new node between root node and first node.
+	mem_hdr* first_node = mem_hdr_base.next;
+	if (first_node) {
+		first_node->prev = m;
+		first_node->checksum = first_node->calc_checksum();
+	}
+	m->next = first_node;
+	mem_hdr_base.next = m;
+	m->prev = &mem_hdr_base;
+	m->checksum = m->calc_checksum();
+
+	global_bytes_alloced += size;
+	global_bytes_alloced_w_padding += total_alloc_size;
+	num_global_allocs++;
+	mutex_unlock();
+
+	// return allocated, aligned buffer to user.
+	*memptr = ptr;
+	return 0;
+}
+
+// free memory
+void free(void *__ptr) throw()
+{
+#define FREE_PFX "free: "
+	if (!__ptr)
+		return; // free(NULL) does nothing.
+
+	bool err = false;
+
+	// Find pointer to prefix just below the user buffer.
+	void** prefix_addr = ((void**)__ptr) - 1;
+	uint8_t* prefix = (uint8_t*)*prefix_addr;
+
+	// make sure prefix address is valid. It must be no further from the user's buffer than the prefix size plus the highest alignment requested.
+	int64_t difftest = (uint8_t*)__ptr - prefix;
+	if (difftest < (int64_t)(PREFIX_SIZE_ACTUAL + sizeof(mem_hdr)) || difftest > (int64_t)(PREFIX_SIZE_ACTUAL + sizeof(mem_hdr) + max_align))
+	{
+		safe_print_with_val(FREE_PFX "error! prefix broken (wrong pointer freed or write before allocation) - ", (uint64_t)__ptr, "\n");
+		__THROW_ERROR__;
+	}
+
+	// Assume we have a mem_hdr struct at the start of the prefix.
+	mem_hdr* m = (mem_hdr*)prefix;
+
+	mutex_lock();
+
+	// All valid allocations must have a magic number here.
+	if (m->magic_num != MAGIC_NUM)
+	{
+		if (m->magic_num == MAGIC_NUM_DELETED)
+			safe_print_with_val(FREE_PFX "error! double free? ", (uint64_t)__ptr, "\n");
+		else
+			safe_print_with_val(FREE_PFX "error! invalid free? ", (uint64_t)__ptr, "\n");
+		err = true;
+	}
+	// validate checksum
+	else if (m->checksum != m->calc_checksum())
+	{
+		safe_print_with_val(FREE_PFX "error! corrupted header before ", (uint64_t)__ptr, "\n");
+		err = true;
+	}
+	// make sure prefix pointer in header is correct
+	else if (prefix + m->prefix_addr_offset != (uint8_t*)prefix_addr)
+	{
+		safe_print_with_val(FREE_PFX "error! corrupted header (prefix ptr bad) before ", (uint64_t)__ptr, "\n");
+		err = true;
+	}
+
+	if (err)
+		__FREE_MUTEX_THROW_ERROR__;
+	else
+	{
+		// remove this node from linked list
+		m->magic_num = MAGIC_NUM_DELETED;
+
+		mem_hdr* prev_node = m->prev;
+		mem_hdr* next_node = m->next;
+
+		prev_node->next = next_node;
+		prev_node->checksum = prev_node->calc_checksum();
+		if (next_node)
+		{
+			next_node->prev = prev_node;
+			next_node->checksum = next_node->calc_checksum();
+		}
+		global_bytes_alloced -= m->requested_size;
+		global_bytes_alloced_w_padding -= m->total_alloc_size;
+		num_global_allocs--;
+	}
+
+	mutex_unlock();
+
+	// make sure prefix and suffix padding bytes are intact. This is done outside critical section so as not to slow down other threads.
+	if (!memvcmp(prefix+sizeof(mem_hdr), PAD_CHAR, m->prefix_addr_offset-sizeof(mem_hdr)))
+	{
+		safe_print_with_val(FREE_PFX "error! write before memory - ", (uint64_t)__ptr, "\n");
+		__THROW_ERROR__;
+	}
+	if (!memvcmp(prefix+m->suffix_offset, PAD_CHAR, m->total_alloc_size-m->suffix_offset))
+	{
+		safe_print_with_val(FREE_PFX "error! write after memory - ", (uint64_t)__ptr, "\n");
+		__THROW_ERROR__;
+	}
+
+#ifdef MEM_DEBUG_FILL_FREED_MEMORY
+	// fill memory with garbage so any attempt to use data will fail. Skip magic number.
+	memset((uint8_t*)m + sizeof(uint32_t), PAD_FREEMEM_CHAR, m->total_alloc_size - sizeof(uint32_t));
+#endif
+
+	// finally free the memory buffer.
+	__libc_free(prefix);
+}
+
+// Overriding implementations of posix_memalign, memalign, valloc, malloc, calloc, realloc - fairly simple, making use of functions defined above.
+// Thanks to stackoverflow user Andreas Grapentin for the idea; see his explanation at:
+// http://stackoverflow.com/questions/17803456/an-alternative-for-the-deprecated-malloc-hook-functionality-of-glibc
+
+int posix_memalign(void **memptr, size_t alignment, size_t size) throw()
+{
+	// We could have directly implemented memory allocation here, but something in the way posix_memalign is declared breaks stack traces
+	// in some scenarios. So we avoid it as much as possible (unless the application calls posix_memalign directly).
+	return mem_debug_posix_memalign(memptr, alignment, size);
+}
+
+void *memalign(size_t boundary, size_t size) throw()
+{
+	void* memptr;
+	if (mem_debug_posix_memalign(&memptr, boundary, size))
+		return NULL;
+	return memptr;
+}
+
+void *valloc(size_t size) throw()
+{
+	return memalign(sysconf(_SC_PAGESIZE),size);
+}
+
+void *malloc(size_t __size) throw()
+{
+	return memalign(0x10, __size);
+}
+
+void *calloc(size_t __nmemb, size_t __size) throw()
+{
+	size_t sz = __nmemb * __size;
+	uint8_t* ret = (uint8_t*)malloc(sz);
+	if (ret) {
+		memset(ret, 0, sz);
+	}
+	return ret;
+}
+
+void *realloc(void *__ptr, size_t __size) throw()
+{
+	if (__ptr == NULL)
+		return malloc(__size); // realloc(NULL, size) is like malloc(size)
+	if (__size == 0)
+	{
+		free(__ptr); // realloc(ptr, 0) is like free
+		return NULL;
+	}
+	uint8_t* new_ptr = (uint8_t*)malloc(__size); // allocate new buffer
+	if (!new_ptr)
+		return NULL;
+
+	// discover size of original buffer - get prefix pointer, as in free()
+	void** prefix_addr = ((void**)__ptr) - 1;
+	uint8_t* prefix = (uint8_t*)*prefix_addr;
+	mem_hdr* m = (mem_hdr*)prefix;
+
+	if (m->magic_num != MAGIC_NUM)
+	{
+		safe_print_with_val("realloc: error! bad ptr given - ", (uint64_t)__ptr, "\n");
+		__THROW_ERROR__;
+	}
+
+	// copy minimum of new and previous buffer sizes
+	size_t sz_copy = (__size < m->requested_size? __size : m->requested_size);
+
+	// copy buffer contents and free old buffer
+	memcpy(new_ptr, __ptr, sz_copy);
+	free(__ptr);
+	return new_ptr;
+}
+
+/* User API */
+
+namespace mem_debug {
+
+// Scan all allocations and test for out of bounds writes and other errors.
+void mem_debug_check(const char* file, const int line, const char* user_msg, const bool this_thread_only)
+{
+#define MEM_DEBUG_CHK_PFX "%s:%d%s: error! "
+	const char* user_msg_prefix;
+	if (user_msg) {
+		user_msg_prefix = " ";
+	}
+	else {
+		user_msg = "";
+		user_msg_prefix = "";
+	}
+
+	long int thread_id = -1;
+	int num_allocs_thread = 0;
+	uint64_t total_bytes_alloced_thread = 0;
+
+	if (this_thread_only)
+		thread_id = get_thread_id();
+
+	mutex_lock();
+
+	mem_hdr* m = mem_hdr_base.next;
+	mem_hdr* prev_m = &mem_hdr_base;
+	int num_allocs=0;
+
+	while (m)
+	{
+		if (m->magic_num == MAGIC_NUM_DELETED)
+		{
+			MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "bad magic (marked as deleted) - %p\n", file, line, user_msg, m);
+			__FREE_MUTEX_THROW_ERROR__;
+		}
+		if (m->magic_num != MAGIC_NUM)
+		{
+			MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "bad magic - %p\n", file, line, user_msg, m);
+			__FREE_MUTEX_THROW_ERROR__;
+		}
+		if (m->checksum != m->calc_checksum())
+		{
+			MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "bad checksum - %p\n", file, line, user_msg, m);
+			__FREE_MUTEX_THROW_ERROR__;
+		}
+		if (m->prev != prev_m)
+		{
+			MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "broken linked list %p - %p after %d nodes\n", file, line, user_msg, prev_m, m, num_allocs);
+
+			// scan broken part of chain backwards to see where it leads
+			mem_hdr* m_rev = prev_m;
+			mem_hdr* m_rev_prev = m;
+			int cnt = 0;
+			while (m_rev)
+			{
+				if (m_rev->next != m_rev_prev)
+				{
+					MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "reverse search breaks at %p - %p after %d nodes\n", file, line, user_msg, m_rev, m_rev_prev, cnt);
+					__FREE_MUTEX_THROW_ERROR__;
+				}
+				m_rev_prev = m_rev;
+				m_rev = m_rev->prev;
+				cnt++;
+			}
+			// backwards search reached a null pointer
+			if (m_rev_prev == &mem_hdr_base)
+				MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "reverse search reached list head after %d nodes\n", file, line, user_msg, cnt);
+			else
+				MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "reverse search reached null prev at %p after %d nodes\n", file, line, user_msg, m_rev_prev, cnt);
+			__FREE_MUTEX_THROW_ERROR__;
+		}
+		uint8_t* p_addr_offset = (uint8_t*)m + m->prefix_addr_offset;
+		uint8_t* orig_alloc = p_addr_offset + sizeof(void**);
+		if (*(mem_hdr**)p_addr_offset != m)
+		{
+			MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "bad pointer to header (possible write before allocation) - %p (header %p)\n", file, line, user_msg, orig_alloc, m);
+			__FREE_MUTEX_THROW_ERROR__;
+		}
+
+		uint8_t* prefix = (uint8_t*)m;
+		if (!memvcmp(prefix+sizeof(mem_hdr), PAD_CHAR, m->prefix_addr_offset-sizeof(mem_hdr)))
+		{
+			MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "write before allocation - %p (header %p)\n", file, line, user_msg, orig_alloc, m);
+			__FREE_MUTEX_THROW_ERROR__;
+		}
+		if (!memvcmp(prefix+m->suffix_offset, PAD_CHAR, m->total_alloc_size-m->suffix_offset))
+		{
+			MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "write after allocation - %p (header %p)\n", file, line, user_msg, orig_alloc, m);
+			__FREE_MUTEX_THROW_ERROR__;
+		}
+
+		if (this_thread_only && m->allocator_thread == thread_id)
+		{
+			num_allocs_thread++;
+			total_bytes_alloced_thread += m->requested_size;
+		}
+
+		num_allocs++;
+		prev_m = m;
+		m = m->next;
+	}
+
+	if (num_allocs != num_global_allocs)
+	{
+		MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "wrong num allocs (at %p, num=%d expected=%d)\n", file, line, user_msg, prev_m, num_allocs, num_global_allocs);
+		__FREE_MUTEX_THROW_ERROR__;
+	}
+
+	mutex_unlock();
+
+	if (this_thread_only) {
+		MD_LOG_WARNING("%s:%d%s%s: Mem check OK, THREAD %d allocs, %llu bytes\n",
+				file, line, user_msg_prefix, user_msg,
+				num_allocs_thread, (unsigned long long)total_bytes_alloced_thread);
+	}
+	else {
+		MD_LOG_WARNING("%s:%d%s%s: Mem check OK, %d allocs, %llu bytes (padded %llu)\n",
+				file, line, user_msg_prefix, user_msg,
+				num_allocs, (unsigned long long)global_bytes_alloced, (unsigned long long)global_bytes_alloced_w_padding);
+	}
+}
+
+// Before performing a memory leak check, clear 'leak' flag from all allocations.
+// is_global defines whether we clear all or only allocations performed by this thread.
+void mem_debug_clear_leak_list(bool is_global)
+{
+	MD_LOG_INFO("Clearing leak table%s.\n", is_global? "":" (this thread only)");
+
+	mutex_lock();
+	mem_hdr* m = mem_hdr_base.next;
+
+	while (m)
+	{
+		if (is_global || m->allocator_thread == get_thread_id())
+			m->leak_detect_flag = false;
+		m = m->next;
+	}
+	mutex_unlock();
+}
+
+// Display a list of all memory allocated but not freed since last mem_debug_clear_leak_list (or program start).
+// is_global defines whether all allocations are shown, or only those performed by the current thread.
+// returns false if no leaks detected, true if leaks detected.
+bool mem_debug_show_leak_list(bool is_global)
+{
+#define CONTENT_DUMP_MAX_SIZE 64
+#define MAX_OUT_STR 1024
+	char out_str[MAX_OUT_STR];
+
+	mutex_lock();
+	mem_hdr* m = mem_hdr_base.next;
+	bool leaks_detected = false;
+
+	while (m)
+	{
+		if ((is_global || m->allocator_thread == get_thread_id()) && m->leak_detect_flag)
+		{
+			if (!leaks_detected)
+			{
+				leaks_detected = true;
+				MD_LOG_INFO("Memory leak summary%s:\n", is_global? "":" (this thread only)");
+			}
+
+			int out_str_o = 0;
+			// Show ID of allocating thread.
+			out_str_o += snprintf(out_str+out_str_o, MAX_OUT_STR-out_str_o, "T%lu ", m->allocator_thread);
+			// Show serial number, global and thread-specific, of this allocation (in different order according to is_global).
+			if (is_global)
+			{
+				out_str_o += snprintf(out_str+out_str_o, MAX_OUT_STR-out_str_o, "#%u (T#%u): ", m->serial_num, m->serial_num_per_thread);
+			}
+			else
+			{
+				out_str_o += snprintf(out_str+out_str_o, MAX_OUT_STR-out_str_o, "#%u (G#%u): ", m->serial_num_per_thread, m->serial_num);
+			}
+
+			// Show address of allocated buffer.
+			uint8_t* orig_alloc = (uint8_t*)m + m->prefix_addr_offset + sizeof(void**);
+			out_str_o += snprintf(out_str+out_str_o, MAX_OUT_STR-out_str_o, "@%p size 0x%x, content: ", (void*)orig_alloc, m->requested_size);
+
+			// check whether this buffer is text or binary data
+			size_t content_dump_size = (m->requested_size < CONTENT_DUMP_MAX_SIZE? m->requested_size : CONTENT_DUMP_MAX_SIZE);
+			bool is_text = true;
+
+			if (orig_alloc[0] == 0)
+			{
+				is_text = false;
+			}
+			else
+			{
+				for (size_t i=0; i<content_dump_size; i++)
+				{
+					if (orig_alloc[i] == '\t' || orig_alloc[i] == '\n' || orig_alloc[i] == '\r')
+						continue;
+					if (orig_alloc[i] == '\0')
+						break;
+					if (orig_alloc[i] < 32 || orig_alloc[i] > 126)
+					{
+						is_text = false;
+						break;
+					}
+				}
+			}
+
+			// Show buffer contents - print as string if text, or hex bytes.
+			if (is_text)
+			{
+				out_str_o += snprintf(out_str+out_str_o, MAX_OUT_STR-out_str_o, "%s", (const char*)orig_alloc);
+			}
+			else
+			{
+				for (size_t i=0; i<content_dump_size; i++)
+					out_str_o += snprintf(out_str+out_str_o, MAX_OUT_STR-out_str_o, "%02x ", orig_alloc[i]);
+			}
+
+			MD_LOG_INFO("%s\n", out_str);
+		}
+		m = m->next;
+	}
+
+	if (!leaks_detected)
+	{
+		MD_LOG_INFO("No memory leaks detected.\n");
+	}
+	mutex_unlock();
+	return leaks_detected;
+}
+
+void mem_debug_abort_on_allocation(unsigned int serial_num, bool is_global)
+{
+	if (is_global)
+		abort_on_global_serial_num = serial_num;
+	else
+		abort_on_thread_serial_num = serial_num;
+}
+
+uint64_t mem_debug_total_alloced_bytes(bool include_padding) {
+	return (include_padding? global_bytes_alloced_w_padding : global_bytes_alloced);
+}
+
+} // namespace
+
+/* C interface */
+
+extern "C" {
+
+void mem_debug_check(const char* file, const int line, const char* user_msg, const int bool_this_thread_only)
+{
+	mem_debug::mem_debug_check(file, line, user_msg, (bool)bool_this_thread_only);
+}
+
+void mem_debug_clear_leak_list(int bool_is_global)
+{
+	mem_debug::mem_debug_clear_leak_list((bool)bool_is_global);
+}
+
+int mem_debug_show_leak_list(int bool_is_global)
+{
+	return (int)mem_debug::mem_debug_show_leak_list((bool)bool_is_global);
+}
+
+void mem_debug_abort_on_allocation(unsigned int serial_num, int bool_is_global)
+{
+	mem_debug::mem_debug_abort_on_allocation(serial_num, (bool)bool_is_global);
+}
+
+uint64_t mem_debug_total_alloced_bytes(int bool_include_padding)
+{
+	return mem_debug::mem_debug_total_alloced_bytes((bool)bool_include_padding);
+}
+
+}
+
+#endif // MEM_DEBUG_ENABLE
+

@@ -1,0 +1,5 @@
+MEM_debug Release Notes
+-----------------------
+v1.0.0, 20151128
+----------------
+* Initial release
