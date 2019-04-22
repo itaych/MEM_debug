@@ -22,8 +22,8 @@ If you’ve followed the Setup instructions, you will notice that your program n
 ```
 ** (736) MEM_debug 1.x.x is active.
 hello world!
-MEM_debug.cpp:170 - At shutdown (peak memory use was 19984 bytes, padded 20428. 3 mallocs, 1 frees): Mem check
-OK, 2 allocs, 19968 bytes (padded 20264)
+MEM_debug.cpp:170 - At shutdown (peak memory use was 19984 bytes, padded 20428. 3 mallocs, 1 frees): Mem
+check OK, 2 allocs, 19968 bytes (padded 20264)
 ```
 The first line is always shown at program start and is intended to let you know MEM_debug is active. The number in parentheses is the process ID.
 
@@ -36,8 +36,8 @@ Now, let's add an allocation without freeing it: `char* buf = (char*)malloc(10);
 ```
 ** (748) MEM_debug 1.x.x is active.
 hello world!
-MEM_debug.cpp:170 - At shutdown (peak memory use was 19994 bytes, padded 20586. 4 mallocs, 1 frees): Mem check
-OK, 3 allocs, 19978 bytes (padded 20422)
+MEM_debug.cpp:170 - At shutdown (peak memory use was 19994 bytes, padded 20586. 4 mallocs, 1 frees): Mem
+check OK, 3 allocs, 19978 bytes (padded 20422)
 ```
 As we can see there is now an additional unfreed allocation reported, and 10 extra bytes in the unpadded memory use value.
 
@@ -45,8 +45,9 @@ Now let’s write a garbage value beyond the allocated memory: `buf[10] = 7;`. T
 ```
 ** (759) MEM_debug 1.x.x is active.
 hello world!
-MEM_debug.cpp:170- At shutdown (peak memory use was 19994 bytes, padded 20586. 4 mallocs, 1 frees): error! write
-after allocation - 0x23451c0 (header 0x2345150) Allocated at Apr 22 22:12:54.488 by thread 759 size 10
+MEM_debug.cpp:170- At shutdown (peak memory use was 19994 bytes, padded 20586. 4 mallocs, 1 frees):
+error! write after allocation - 0x23451c0 (header 0x2345150) Allocated at Apr 22 22:12:54.488 by
+thread 759 size 10
 Segmentation fault
 ```
 What happened here? The shutdown memory test went over all allocations and found that the padding after the user buffer was overwritten. A SIGSEGV signal is raised in this and many other cases, to halt the program and allow you to debug it (when using a debugger) or generate a core dump.
