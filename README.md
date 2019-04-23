@@ -1,8 +1,8 @@
 # MEM_debug - A Quick and Easy Memory Debugger
 ## Welcome to MEM_debug
-MEM_debug is a simple, effective and easy to use heap corruption and memory leak detector. By dropping a single source file into your project you will immediately be able to catch out of bounds writes, double or invalid frees, and information on allocated memory that wasn’t freed. If you suspect a memory corruption bug, a simple API allows you to perform more specific checks during runtime to pinpoint its location. The impact on program performance is minimal.
+MEM_debug is a simple, effective and easy to use heap corruption and memory leak detector. By dropping a single source file into your project you will instantly be able to catch out of bounds writes, double or invalid frees, and information on allocated memory that wasn’t freed. If you suspect a memory corruption bug or a leak, a simple API allows you to perform more specific checks during runtime to pinpoint their location.
 
-MEM_debug is not the answer to every problem. There are far more exhaustive solutions but each has its disadvantages: [Valgrind](http://valgrind.org/) is an excellent tool but slows down the program by an order of magnitude, making it unsuitable for real time systems or cases where a problem only appears after a long execution time. Other systems such as [Dmalloc](http://dmalloc.com/) are certainly more featured but are often complicated to use.
+A major advantage to MEM_debug is that, as opposed to most other solutions, there is no need to recompile any of your existing code to enable it; in fact, it will even work when linking against existing libraries. And, as opposed to [Valgrind](http://valgrind.org/) the impact on performance is minimal to negligible.
 ## Platforms
 MEM_debug has been tested on C and C++ projects compiled with GCC under Linux, targeting both Intel and ARM processors.
 I’m not sure about other platforms and compilers but glibc is a minimum requirement due to the method used to intercept heap management calls. I’ve had no luck with MacOS or MinGW.
@@ -29,7 +29,7 @@ The first line is always shown at program start and is intended to let you know 
 
 The last line is automatically output at program exit. It indicates the result of a full heap test. It shows the peak memory use over the lifetime of the process, the total amount of times 'malloc' and 'free' were called, and finally how many outstanding allocations exist and how many bytes remain allocated at program exit. The ‘padded’ values indicate the amount of memory actually allocated, which is higher than what the program requested because it includes the memory allocated for the padding and bookkeeping.
 
-I actually don't know why a program that does nothing reports two unfreed allocations at exit. This is a known issue and I don't know its cause.
+(I actually don't know why a program that does nothing reports two unfreed allocations at exit. This is a known issue and I don't know its cause.)
 
 Now, let's add an allocation without freeing it: `char* buf = (char*)malloc(10);`
 
