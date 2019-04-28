@@ -72,7 +72,7 @@ freely, subject to the following restrictions:
 #include <sys/time.h>
 #include <sys/syscall.h>
 
-#define MEM_DEBUG_VERSION "1.0.6"
+#define MEM_DEBUG_VERSION "1.0.7"
 
 // Optimize an 'if' for the most likely case
 #ifdef __GNUC__
