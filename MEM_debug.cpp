@@ -72,7 +72,7 @@ freely, subject to the following restrictions:
 #include <sys/time.h>
 #include <sys/syscall.h>
 
-#define MEM_DEBUG_VERSION "1.0.7"
+#define MEM_DEBUG_VERSION "1.0.8"
 
 // Optimize an 'if' for the most likely case
 #ifdef __GNUC__
@@ -113,8 +113,10 @@ struct mem_hdr {
 	bool leak_detect_flag;
 	long int allocator_thread;
 #ifdef ENABLE_CPP11
-	uint64_t* thread_bytes_alloced_ptr; // when freeing, decrease value at this pointer (can't directly change thread_bytes_alloced because memory may be freed from different thread than allocation).
-	uint64_t* thread_bytes_alloced_w_padding_ptr; // same as above
+	// for updating thread specific counters when freeing memory, we can't directly change thread locals because memory may be freed from different thread than allocation. Use these pointers instead.
+	int* num_thread_allocs_ptr;
+	uint64_t* thread_bytes_alloced_ptr;
+	uint64_t* thread_bytes_alloced_w_padding_ptr;
 #endif
 	timeval timestamp;
 	uint32_t checksum; // ensures struct has not been modified
@@ -133,13 +135,16 @@ static mem_hdr mem_hdr_base = {0, NULL, NULL, 0, 0, 0, 0};
 // bookkeeping
 static int num_global_allocs = 0; // amount of blocks currently allocated.
 static uint64_t global_num_times_malloc_called = 0; // total amount of times 'malloc' was called
+static __thread uint64_t thread_num_times_malloc_called = 0; // total amount of times 'malloc' was called by this thread
 static uint64_t global_num_times_free_called = 0; // total amount of times 'free' was called
+static __thread uint64_t thread_num_times_free_called = 0; // total amount of times 'free' was called by this thread
 
 static uint64_t global_bytes_alloced = 0; // total memory allocated (by user, not including padding by mem_debug)
 static uint64_t global_bytes_alloced_w_padding = 0; // total memory allocated (including paddings)
 static uint64_t global_bytes_alloced_max = 0; // peak total memory allocated (not including padding)
 static uint64_t global_bytes_alloced_w_padding_max = 0; // peak total memory allocated (including padding)
 #ifdef ENABLE_CPP11
+static __thread int num_thread_allocs = 0; // amount of blocks currently allocated by this thread.
 // same as global_bytes_alloced, but for each thread separately
 static __thread uint64_t thread_bytes_alloced = 0; // thread memory allocated (by user, not including padding by mem_debug)
 static __thread uint64_t thread_bytes_alloced_w_padding = 0; // thread memory allocated (including paddings)
@@ -312,8 +317,9 @@ struct MemDebugThreadExitCleaner {
 		mem_hdr* m = mem_hdr_base.next;
 		while (m) {
 			if (m->allocator_thread == thread_id) {
-				m->thread_bytes_alloced_ptr = &global_dummy_val;
-				m->thread_bytes_alloced_w_padding_ptr = &global_dummy_val;
+				m->num_thread_allocs_ptr = &global_dummy_int;
+				m->thread_bytes_alloced_ptr = &global_dummy_uint64;
+				m->thread_bytes_alloced_w_padding_ptr = &global_dummy_uint64;
 				m->checksum = m->calc_checksum();
 			}
 			m = m->next;
@@ -321,10 +327,12 @@ struct MemDebugThreadExitCleaner {
 		mutex_unlock();
 	}
 	void dummy_func() {} // this function must be called from somewhere to ensure that a MemDebugThreadExitCleaner is created per thread
-	static uint64_t global_dummy_val; // dummy location for thread_bytes_alloced_ptr and thread_bytes_alloced_w_padding_ptr.
+	static int global_dummy_int; // dummy location for num_thread_allocs_ptr, after thread is destroyed but some allocation from that thread is not freed.
+	static uint64_t global_dummy_uint64; // dummy location for thread_bytes_alloced_ptr and thread_bytes_alloced_w_padding_ptr.
 };
 static thread_local MemDebugThreadExitCleaner dummy_thread_exit_cleaner;
-uint64_t MemDebugThreadExitCleaner::global_dummy_val = 0;
+int MemDebugThreadExitCleaner::global_dummy_int = 0;
+uint64_t MemDebugThreadExitCleaner::global_dummy_uint64 = 0;
 #endif
 
 // allocate aligned memory. Other allocators call this function.
@@ -444,6 +452,8 @@ static int mem_debug_posix_memalign(void **memptr, size_t alignment, size_t size
 		global_bytes_alloced_w_padding_max = global_bytes_alloced_w_padding;
 	}
 #ifdef ENABLE_CPP11
+	num_thread_allocs++;
+	m->num_thread_allocs_ptr = &num_thread_allocs;
 	thread_bytes_alloced += size;
 	m->thread_bytes_alloced_ptr = &thread_bytes_alloced; // thread_bytes_alloced is a thread-specific variable. When freeing, reduce value of the correct one.
 	thread_bytes_alloced_w_padding += total_alloc_size;
@@ -455,6 +465,7 @@ static int mem_debug_posix_memalign(void **memptr, size_t alignment, size_t size
 #endif
 	m->checksum = m->calc_checksum();
 	global_num_times_malloc_called++;
+	thread_num_times_malloc_called++;
 	num_global_allocs++;
 	mutex_unlock();
 
@@ -528,10 +539,12 @@ void free(void *__ptr) throw() {
 		global_bytes_alloced -= m->requested_size;
 		global_bytes_alloced_w_padding -= m->total_alloc_size;
 #ifdef ENABLE_CPP11
+		*(m->num_thread_allocs_ptr) -= 1;
 		*(m->thread_bytes_alloced_ptr) -= m->requested_size;
 		*(m->thread_bytes_alloced_w_padding_ptr) -= m->total_alloc_size;
 #endif
 		global_num_times_free_called++;
+		thread_num_times_free_called++;
 		num_global_allocs--;
 	}
 
@@ -932,6 +945,19 @@ uint64_t mem_debug_total_alloced_bytes(bool include_padding, bool get_peak, bool
 	}
 }
 
+uint64_t mem_debug_total_mallocs(bool is_global, bool outstanding_only) {
+	if (is_global) {
+		return (outstanding_only? num_global_allocs : global_num_times_malloc_called);
+	}
+	else {
+#ifdef ENABLE_CPP11
+		return (outstanding_only? num_thread_allocs : thread_num_times_malloc_called);
+#else
+		return 0;
+#endif
+	}
+}
+
 } // namespace
 
 /* C interface */
@@ -960,6 +986,10 @@ void mem_debug_abort_on_allocation(unsigned int serial_num, unsigned int size, i
 
 uint64_t mem_debug_total_alloced_bytes(int bool_include_padding, int get_peak, int is_global) {
 	return mem_debug::mem_debug_total_alloced_bytes((bool)bool_include_padding, (bool)get_peak, (bool)is_global);
+}
+
+uint64_t mem_debug_total_mallocs(int is_global, int outstanding_only) {
+	return mem_debug::mem_debug_total_mallocs((bool)is_global, (bool)outstanding_only);
 }
 
 }

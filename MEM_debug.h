@@ -71,6 +71,11 @@ void mem_debug_abort_on_allocation(unsigned int serial_num, unsigned int size = 
 // Setting is_global to false will return information pertaining to current thread only (this feature requires c++11, 0 will be returned otherwise).
 uint64_t mem_debug_total_alloced_bytes(bool include_padding = false, bool get_peak = false, bool is_global = true);
 
+// Returns total amount of allocated blocks.
+// Setting is_global to false will return information pertaining to current thread only (this feature requires c++11, 0 will be returned otherwise).
+// outstanding_only = false: returns the number of times malloc was called. true: returns number of currently allocated blocks.
+uint64_t mem_debug_total_mallocs(bool is_global = true, bool outstanding_only = true);
+
 #else
 static inline void mem_debug_check(const char* file, const int line, const char* user_msg = NULL, const bool this_thread_only = false) {}
 static inline void mem_debug_check_ptr(const void* ptr) {}
@@ -78,6 +83,7 @@ static inline void mem_debug_clear_leak_list(bool is_global = false, bool restar
 static inline bool mem_debug_show_leak_list(bool is_global = false) { return false; }
 static inline void mem_debug_abort_on_allocation(unsigned int serial_num, unsigned int size = -1, bool is_global = false) {}
 static inline uint64_t mem_debug_total_alloced_bytes(bool include_padding = false, bool get_peak = false, bool is_global = true) { return 0; }
+static inline uint64_t mem_debug_total_mallocs(bool is_global = true, bool outstanding_only = true) { return 0; }
 #define MEM_DEBUG_CHECK
 #define MEM_DEBUG_CHECK_MSG(msg)
 #define MEM_DEBUG_THREAD_CHECK(msg)
@@ -102,6 +108,7 @@ void mem_debug_clear_leak_list(int bool_is_global, int bool_restart_serial_nums)
 int mem_debug_show_leak_list(int bool_is_global);
 void mem_debug_abort_on_allocation(unsigned int serial_num, unsigned int size, int bool_is_global);
 uint64_t mem_debug_total_alloced_bytes(int bool_include_padding, int get_peak, int is_global);
+uint64_t mem_debug_total_mallocs(int is_global, int outstanding_only);
 #else
 static inline void mem_debug_check(const char* file, const int line, const char* user_msg, const int bool_this_thread_only) {}
 static inline void mem_debug_check_ptr(const void* ptr) {}
@@ -109,6 +116,7 @@ static inline void mem_debug_clear_leak_list(int bool_is_global, int bool_restar
 static inline int mem_debug_show_leak_list(int bool_is_global) { return MD_FALSE; }
 static inline void mem_debug_abort_on_allocation(unsigned int serial_num, unsigned int size, int bool_is_global) {}
 static inline uint64_t mem_debug_total_alloced_bytes(int bool_include_padding, int get_peak, int is_global) { return 0; }
+static inline uint64_t mem_debug_total_mallocs(int is_global, int outstanding_only) { return 0; }
 #define MEM_DEBUG_CHECK
 #define MEM_DEBUG_CHECK_MSG(msg)
 #define MEM_DEBUG_THREAD_CHECK(msg)

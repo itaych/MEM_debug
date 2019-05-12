@@ -1,5 +1,9 @@
 MEM_debug Release Notes
 -----------------------
+v1.0.8, 20190512
+----------------
+* added mem_debug_total_mallocs.
+
 v1.0.7, 20190423
 ----------------
 * simplified mem_debug_check.
