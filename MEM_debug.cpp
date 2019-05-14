@@ -45,22 +45,13 @@ freely, subject to the following restrictions:
 #define MD_LOG_WARNING printf
 #define MD_LOG_ERROR printf
 
-// Enable features that require C++11.
-#if __cplusplus >= 201103L
-#define ENABLE_CPP11
-#endif
-
 // End of user defines.
 
 #include "MEM_debug.h"
 
 #ifdef MEM_DEBUG_ENABLE
 
-#ifdef ENABLE_CPP11
 #pragma message "Memory debugger ENABLED"
-#else
-#pragma message "Memory debugger ENABLED. Please enable C++11 for best results."
-#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -71,8 +62,10 @@ freely, subject to the following restrictions:
 #include <signal.h>
 #include <sys/time.h>
 #include <sys/syscall.h>
+#include <map>
 
-#define MEM_DEBUG_VERSION "1.0.8"
+#define MEM_DEBUG_NAME "MEM_debug "
+#define MEM_DEBUG_VERSION "1.0.9"
 
 // Optimize an 'if' for the most likely case
 #ifdef __GNUC__
@@ -112,21 +105,12 @@ struct mem_hdr {
 	uint32_t serial_num_per_thread;
 	bool leak_detect_flag;
 	long int allocator_thread;
-#ifdef ENABLE_CPP11
-	// for updating thread specific counters when freeing memory, we can't directly change thread locals because memory may be freed from different thread than allocation. Use these pointers instead.
-	int* num_thread_allocs_ptr;
-	uint64_t* thread_bytes_alloced_ptr;
-	uint64_t* thread_bytes_alloced_w_padding_ptr;
-#endif
-	timeval timestamp;
-	uint32_t checksum; // ensures struct has not been modified
+	timeval timestamp; // time stamp of allocation
+	uint32_t checksum; // ensures integrity of this struct
 
 	uint32_t calc_checksum() { return (unsigned long)prev + (unsigned long)next
 			+ prefix_addr_offset + suffix_offset + total_alloc_size + requested_size
 			+ serial_num + serial_num_per_thread + allocator_thread
-#ifdef ENABLE_CPP11
-			+ (unsigned long)thread_bytes_alloced_ptr + (unsigned long)thread_bytes_alloced_w_padding_ptr
-#endif
 			+ timestamp.tv_sec + timestamp.tv_usec; }
 };
 
@@ -143,14 +127,8 @@ static uint64_t global_bytes_alloced = 0; // total memory allocated (by user, no
 static uint64_t global_bytes_alloced_w_padding = 0; // total memory allocated (including paddings)
 static uint64_t global_bytes_alloced_max = 0; // peak total memory allocated (not including padding)
 static uint64_t global_bytes_alloced_w_padding_max = 0; // peak total memory allocated (including padding)
-#ifdef ENABLE_CPP11
-static __thread int num_thread_allocs = 0; // amount of blocks currently allocated by this thread.
-// same as global_bytes_alloced, but for each thread separately
-static __thread uint64_t thread_bytes_alloced = 0; // thread memory allocated (by user, not including padding by mem_debug)
-static __thread uint64_t thread_bytes_alloced_w_padding = 0; // thread memory allocated (including paddings)
 static __thread uint64_t thread_bytes_alloced_max = 0; // peak thread memory allocated (not including padding)
 static __thread uint64_t thread_bytes_alloced_w_padding_max = 0; // peak thread memory allocated (including padding)
-#endif
 
 static size_t max_align = 0; // highest alignment request seen.
 static uint32_t alloc_serial_num = 0; // serial number of next allocation (process-wide)
@@ -163,19 +141,28 @@ static unsigned int abort_on_size_global = 0;
 static __thread uint32_t abort_on_thread_serial_num = INVALID_SERIAL;
 static __thread unsigned int abort_on_size_thread = 0;
 
-// Dummy object that announces memory checker at startup and runs final check at shutdown.
-struct MemDebugInfo {
-	MemDebugInfo() { printf("** (%d) MEM_debug " MEM_DEBUG_VERSION " is active.\n", getpid()); }
-	~MemDebugInfo() {
-		const int MAX_EXIT_MSG_STR=128;
-		char msg[MAX_EXIT_MSG_STR];
-		snprintf(msg, MAX_EXIT_MSG_STR, "- At shutdown (peak memory use was %llu bytes, padded %llu. %llu mallocs, %llu frees)",
-				(unsigned long long)global_bytes_alloced_max, (unsigned long long)global_bytes_alloced_w_padding_max,
-				(unsigned long long)global_num_times_malloc_called, (unsigned long long)global_num_times_free_called);
-		mem_debug::mem_debug_check(__FILE__, __LINE__, msg);
+// Thread specific statistics must be dealt with carefully because a memory block may be freed from a different thread from which it was allocated, and cannot be thread_local
+// because the allocating thread may have been destroyed. The solution is to store thread specific data in a map.
+struct ThreadSpecificInfo {
+	int num_thread_allocs; // amount of blocks currently allocated by this thread.
+	uint64_t thread_bytes_alloced; // thread memory allocated (by user, not including padding by mem_debug) by this thread,
+	uint64_t thread_bytes_alloced_w_padding; // thread memory allocated (including paddings) by this thread.
+	ThreadSpecificInfo() : num_thread_allocs(0), thread_bytes_alloced(0), thread_bytes_alloced_w_padding(0) {}
+};
+// For this map define an allocator that allocates memory directly, bypassing MEM_debug.
+template<typename _Tp> class libc_allocator : public std::allocator<_Tp> {
+public:
+	template<typename _Tp1> struct rebind { typedef libc_allocator<_Tp1> other; };
+	_Tp* allocate(size_t __n, const void* unused = 0) {
+		return static_cast<_Tp*>(__libc_malloc(__n * sizeof(_Tp)));
+	}
+	void deallocate(_Tp* __p, size_t unused) {
+		__libc_free(__p);
 	}
 };
-static MemDebugInfo memdebuginfo;
+typedef std::map<long int, ThreadSpecificInfo, std::less<int>, libc_allocator<std::pair<const long int, ThreadSpecificInfo>>> ThreadSpecificInfoMap;
+static ThreadSpecificInfoMap *thread_specific_info; // Map cannot be a static object, as it may not be initialized at first memory allocation.
+static bool thread_specific_info_valid = false;
 
 // compare memory to constant byte. returns true iff all bytes in memory are equal to val.
 // by stackoverflow user mihaif. http://stackoverflow.com/a/28563801/3779334
@@ -213,34 +200,45 @@ static void safe_print_string_escaped(const char* str, const int fd = STDERR_FIL
 }
 
 static void safe_print_hex(uint64_t val, const int fd = STDERR_FILENO) {
-	safe_print_string("0x");
-	if (val == 0) {
-		safe_print_string("0");
-	}
-	else {
-		int digs_remaining = 16;
-		while(!(val & 0xf000000000000000ull)) {
-			val <<= 4;
-			digs_remaining--;
+	char digits[19]; // 0x + 16 digits + null terminator
+	char* current = digits + sizeof(digits);
+	*--current = '\0';
+	do {
+		char hex_digit = val & 0xf;
+		if (hex_digit < 0xa) {
+			hex_digit += '0';
 		}
-		while (digs_remaining) {
-			char hex_digit = ((val & 0xf000000000000000ull) >> (64-4)) & 0xf;
-			if (hex_digit < 0xa) {
-				hex_digit += '0';
-			}
-			else {
-				hex_digit += 'a' - 0xa;
-			}
-			void_write(fd, &hex_digit, 1);
-			val <<= 4;
-			digs_remaining--;
+		else {
+			hex_digit += 'a' - 0xa;
 		}
-	}
+		*--current = hex_digit;
+		val >>= 4;
+	} while (val != 0);
+	*--current = 'x';
+	*--current = '0';
+	safe_print_string(current);
 }
 
-static void safe_print_with_val(const char* str1, uint64_t val, const char* str2, const int fd = STDERR_FILENO) {
+static void safe_print_dec(uint64_t val, const int fd = STDERR_FILENO) {
+	char digits[21]; // 20 digits + null terminator
+	char* current = digits + sizeof(digits);
+	*--current = '\0';
+	do {
+		*--current = '0' + (val % 10);
+		val /= 10;
+	} while (val != 0);
+	safe_print_string(current);
+}
+
+static void safe_print_with_hex_val(const char* str1, uint64_t val, const char* str2, const int fd = STDERR_FILENO) {
 	safe_print_string(str1, fd);
 	safe_print_hex(val, fd);
+	safe_print_string(str2, fd);
+}
+
+static void safe_print_with_dec_val(const char* str1, uint64_t val, const char* str2, const int fd = STDERR_FILENO) {
+	safe_print_string(str1, fd);
+	safe_print_dec(val, fd);
 	safe_print_string(str2, fd);
 }
 
@@ -249,6 +247,20 @@ static long int get_thread_id() {
 	static __thread long int thread_id = syscall(SYS_gettid);
 	return thread_id;
 }
+
+// Dummy object that announces memory checker at startup and runs final check at shutdown.
+struct MemDebugInfo {
+	MemDebugInfo() { safe_print_with_dec_val("** (", getpid(), ") " MEM_DEBUG_NAME MEM_DEBUG_VERSION " is active.\n"); }
+	~MemDebugInfo() {
+		const int MAX_EXIT_MSG_STR=128;
+		char msg[MAX_EXIT_MSG_STR];
+		snprintf(msg, MAX_EXIT_MSG_STR, "- At shutdown (peak memory use was %llu bytes, padded %llu. %llu mallocs, %llu frees)",
+				(unsigned long long)global_bytes_alloced_max, (unsigned long long)global_bytes_alloced_w_padding_max,
+				(unsigned long long)global_num_times_malloc_called, (unsigned long long)global_num_times_free_called);
+		mem_debug::mem_debug_check(__FILE__, __LINE__, msg);
+	}
+};
+static MemDebugInfo memdebuginfo;
 
 // Get thread and timestamp from memory header and create human readable output.
 #define TIME2STR_SZ 100
@@ -288,7 +300,7 @@ static inline void mutex_lock() {
 		is_alloc_mutex_inited = true;
 	}
 	if (UNLIKELY(is_mutex_owned)) {
-		safe_print_string("Mutex double lock!\n");
+		safe_print_with_dec_val(MEM_DEBUG_NAME "Mutex double lock from thread ", (uint64_t)get_thread_id(), "!\n");
 		pthread_mutex_unlock(&alloc_mutex);
 		is_mutex_owned = false;
 		__THROW_ERROR__;
@@ -298,49 +310,16 @@ static inline void mutex_lock() {
 }
 static inline void mutex_unlock() {
 	if (UNLIKELY(!is_mutex_owned)) {
-		safe_print_string("Mutex invalid unlock!\n");
+		safe_print_string(MEM_DEBUG_NAME "Mutex invalid unlock!\n");
 		__THROW_ERROR__;
 	}
 	pthread_mutex_unlock(&alloc_mutex);
 	is_mutex_owned = false;
 }
 
-#ifdef ENABLE_CPP11
-// Per-thread object that ensures that when a thread is deleted, in all memory block headers that were allocated by that thread, thread_bytes_alloced_ptr and
-// thread_bytes_alloced_w_padding_ptr shall no longer point to the thread-local variable (which no longer exists) but to a dummy location that is safe to
-// update (but whose value is unimportant).
-struct MemDebugThreadExitCleaner {
-	~MemDebugThreadExitCleaner() {
-		long int thread_id = get_thread_id();
-		// safe_print_with_val("close thread ", thread_id, "\n"); // just to verify that this is really called at thread exit
-		mutex_lock();
-		mem_hdr* m = mem_hdr_base.next;
-		while (m) {
-			if (m->allocator_thread == thread_id) {
-				m->num_thread_allocs_ptr = &global_dummy_int;
-				m->thread_bytes_alloced_ptr = &global_dummy_uint64;
-				m->thread_bytes_alloced_w_padding_ptr = &global_dummy_uint64;
-				m->checksum = m->calc_checksum();
-			}
-			m = m->next;
-		}
-		mutex_unlock();
-	}
-	void dummy_func() {} // this function must be called from somewhere to ensure that a MemDebugThreadExitCleaner is created per thread
-	static int global_dummy_int; // dummy location for num_thread_allocs_ptr, after thread is destroyed but some allocation from that thread is not freed.
-	static uint64_t global_dummy_uint64; // dummy location for thread_bytes_alloced_ptr and thread_bytes_alloced_w_padding_ptr.
-};
-static thread_local MemDebugThreadExitCleaner dummy_thread_exit_cleaner;
-int MemDebugThreadExitCleaner::global_dummy_int = 0;
-uint64_t MemDebugThreadExitCleaner::global_dummy_uint64 = 0;
-#endif
-
 // allocate aligned memory. Other allocators call this function.
 static int mem_debug_posix_memalign(void **memptr, size_t alignment, size_t size) {
-#ifdef ENABLE_CPP11
-	dummy_thread_exit_cleaner.dummy_func(); // does nothing, but dummy_thread_exit_cleaner isn't constructed without this call
-#endif
-#define MALLOC_PFX "malloc: "
+#define MALLOC_PFX MEM_DEBUG_NAME "malloc: "
 	long int thread_id = get_thread_id();
 
 	if (UNLIKELY(size == 0)) { // alloc(0) returns null
@@ -348,7 +327,7 @@ static int mem_debug_posix_memalign(void **memptr, size_t alignment, size_t size
 		return 0;
 	}
 	if (alignment & (alignment-1)) { // alignment not power of 2?
-		safe_print_with_val(MALLOC_PFX "bad align ", alignment, "\n");
+		safe_print_with_dec_val(MALLOC_PFX "bad align ", alignment, "\n");
 		__THROW_ERROR__;
 	}
 	const size_t MIN_ALIGNMENT = sizeof(void*) * 2; // minimum alignment, 8 bytes for 32-bit systems, 16 bytes for 64-bit.
@@ -361,9 +340,9 @@ static int mem_debug_posix_memalign(void **memptr, size_t alignment, size_t size
 
 	if (size > MAX_ALLOC) { // catch invalid allocation sizes
 		safe_print_string(MALLOC_PFX "bad alloc size ");
-		safe_print_hex(size);
+		safe_print_dec(size);
 		safe_print_string(", max allowed ");
-		safe_print_hex(MAX_ALLOC);
+		safe_print_dec(MAX_ALLOC);
 		safe_print_string("\n");
 		*memptr = NULL;
 		//__THROW_ERROR__;
@@ -381,11 +360,11 @@ static int mem_debug_posix_memalign(void **memptr, size_t alignment, size_t size
 	uint8_t* ptr = (uint8_t*)__libc_malloc(total_alloc_size);
 	if (!ptr) { // allocation failure?
 		safe_print_string(MALLOC_PFX "__libc_malloc fail! Requested size ");
-		safe_print_hex(size);
+		safe_print_dec(size);
 		safe_print_string(", total requested ");
-		safe_print_hex(total_alloc_size);
+		safe_print_dec(total_alloc_size);
 		safe_print_string(", already alloced ");
-		safe_print_hex(global_bytes_alloced_w_padding);
+		safe_print_dec(global_bytes_alloced_w_padding);
 		safe_print_string("\n");
 		*memptr = NULL;
 		//__THROW_ERROR__;
@@ -422,7 +401,7 @@ static int mem_debug_posix_memalign(void **memptr, size_t alignment, size_t size
 	// abort if we've reached a user requested serial number.
 	if ((abort_on_global_serial_num != INVALID_SERIAL && m->serial_num == abort_on_global_serial_num && (abort_on_size_global == 0 || abort_on_size_global == size)) ||
 		(abort_on_thread_serial_num != INVALID_SERIAL && m->serial_num_per_thread == abort_on_thread_serial_num && (abort_on_size_thread == 0 || abort_on_size_thread == size))) {
-		safe_print_with_val(MALLOC_PFX "reached requested allocation number, size ", size, ", aborting\n");
+		safe_print_with_dec_val(MALLOC_PFX "reached requested allocation number, size ", size, ", aborting\n");
 		__THROW_ERROR__;
 	}
 
@@ -451,18 +430,22 @@ static int mem_debug_posix_memalign(void **memptr, size_t alignment, size_t size
 		global_bytes_alloced_max = global_bytes_alloced;
 		global_bytes_alloced_w_padding_max = global_bytes_alloced_w_padding;
 	}
-#ifdef ENABLE_CPP11
-	num_thread_allocs++;
-	m->num_thread_allocs_ptr = &num_thread_allocs;
-	thread_bytes_alloced += size;
-	m->thread_bytes_alloced_ptr = &thread_bytes_alloced; // thread_bytes_alloced is a thread-specific variable. When freeing, reduce value of the correct one.
-	thread_bytes_alloced_w_padding += total_alloc_size;
-	m->thread_bytes_alloced_w_padding_ptr = &thread_bytes_alloced_w_padding;
-	if (thread_bytes_alloced > thread_bytes_alloced_max) {
-		thread_bytes_alloced_max = thread_bytes_alloced;
-		thread_bytes_alloced_w_padding_max = thread_bytes_alloced_w_padding;
+
+	// create thread statistics map here, and set global pointer to this object.
+	static ThreadSpecificInfoMap thread_specific_info_map;
+	thread_specific_info = &thread_specific_info_map;
+	thread_specific_info_valid = true;
+
+	// update thread specific statistics
+	ThreadSpecificInfo &th = (*thread_specific_info)[thread_id];
+	th.num_thread_allocs++;
+	th.thread_bytes_alloced += size;
+	th.thread_bytes_alloced_w_padding += total_alloc_size;
+	if (th.thread_bytes_alloced > thread_bytes_alloced_max) {
+		thread_bytes_alloced_max = th.thread_bytes_alloced;
+		thread_bytes_alloced_w_padding_max = th.thread_bytes_alloced_w_padding;
 	}
-#endif
+
 	m->checksum = m->calc_checksum();
 	global_num_times_malloc_called++;
 	thread_num_times_malloc_called++;
@@ -476,7 +459,7 @@ static int mem_debug_posix_memalign(void **memptr, size_t alignment, size_t size
 
 // free memory
 void free(void *__ptr) throw() {
-#define FREE_PFX "free: "
+#define FREE_PFX MEM_DEBUG_NAME "free: "
 	if (!__ptr) {
 		return; // free(NULL) does nothing.
 	}
@@ -489,7 +472,7 @@ void free(void *__ptr) throw() {
 	// make sure prefix address is valid. It must be no further from the user's buffer than the prefix size plus the highest alignment requested.
 	int64_t difftest = (uint8_t*)__ptr - prefix;
 	if (difftest < (int64_t)(PREFIX_SIZE_ACTUAL + sizeof(mem_hdr)) || difftest > (int64_t)(PREFIX_SIZE_ACTUAL + sizeof(mem_hdr) + max_align)) {
-		safe_print_with_val(FREE_PFX "error! prefix broken (wrong pointer freed or write before allocation) - ", (uint64_t)__ptr, "\n");
+		safe_print_with_hex_val(FREE_PFX "error! prefix broken (wrong pointer freed or write before allocation) - ", (uint64_t)__ptr, "\n");
 		__THROW_ERROR__;
 	}
 
@@ -501,21 +484,21 @@ void free(void *__ptr) throw() {
 	// All valid allocations must have a magic number here.
 	if (m->magic_num != MAGIC_NUM) {
 		if (m->magic_num == MAGIC_NUM_DELETED) {
-			safe_print_with_val(FREE_PFX "error! double free? ", (uint64_t)__ptr, "\n");
+			safe_print_with_hex_val(FREE_PFX "error! double free? ", (uint64_t)__ptr, "\n");
 		}
 		else {
-			safe_print_with_val(FREE_PFX "error! invalid free? ", (uint64_t)__ptr, "\n");
+			safe_print_with_hex_val(FREE_PFX "error! invalid free? ", (uint64_t)__ptr, "\n");
 		}
 		err = true;
 	}
 	// validate checksum
 	else if (m->checksum != m->calc_checksum()) {
-		safe_print_with_val(FREE_PFX "error! corrupted header before ", (uint64_t)__ptr, "\n");
+		safe_print_with_hex_val(FREE_PFX "error! corrupted header before ", (uint64_t)__ptr, "\n");
 		err = true;
 	}
 	// make sure prefix pointer in header is correct
 	else if (prefix + m->prefix_addr_offset != (uint8_t*)prefix_addr) {
-		safe_print_with_val(FREE_PFX "error! corrupted header (prefix ptr bad) before ", (uint64_t)__ptr, "\n");
+		safe_print_with_hex_val(FREE_PFX "error! corrupted header (prefix ptr bad) before ", (uint64_t)__ptr, "\n");
 		err = true;
 	}
 
@@ -538,11 +521,22 @@ void free(void *__ptr) throw() {
 		}
 		global_bytes_alloced -= m->requested_size;
 		global_bytes_alloced_w_padding -= m->total_alloc_size;
-#ifdef ENABLE_CPP11
-		*(m->num_thread_allocs_ptr) -= 1;
-		*(m->thread_bytes_alloced_ptr) -= m->requested_size;
-		*(m->thread_bytes_alloced_w_padding_ptr) -= m->total_alloc_size;
-#endif
+
+		// update thread specific statistics
+		ThreadSpecificInfo &th = (*thread_specific_info)[m->allocator_thread];
+		th.num_thread_allocs--;
+		th.thread_bytes_alloced -= m->requested_size;
+		th.thread_bytes_alloced_w_padding -= m->total_alloc_size;
+		if (th.num_thread_allocs <= 0) {
+			if (th.thread_bytes_alloced != 0) {
+				safe_print_with_dec_val(FREE_PFX "Internal inconsistency for thread ", (uint64_t)m->allocator_thread, ", ");
+				safe_print_with_dec_val("there are ", th.thread_bytes_alloced, " bytes allocated when should be 0!\n");
+				mutex_unlock();
+				__THROW_ERROR__;
+			}
+			thread_specific_info->erase(m->allocator_thread); // delete info for this thread, since all blocks have been freed.
+		}
+
 		global_num_times_free_called++;
 		thread_num_times_free_called++;
 		num_global_allocs--;
@@ -552,11 +546,11 @@ void free(void *__ptr) throw() {
 
 	// make sure prefix and suffix padding bytes are intact. This is done outside critical section so as not to slow down other threads.
 	if (!memvcmp(prefix+sizeof(mem_hdr), PAD_CHAR, m->prefix_addr_offset-sizeof(mem_hdr))) {
-		safe_print_with_val(FREE_PFX "error! write before memory - ", (uint64_t)__ptr, "\n");
+		safe_print_with_hex_val(FREE_PFX "error! write before memory - ", (uint64_t)__ptr, "\n");
 		__THROW_ERROR__;
 	}
 	if (!memvcmp(prefix+m->suffix_offset, PAD_CHAR, m->total_alloc_size-m->suffix_offset)) {
-		safe_print_with_val(FREE_PFX "error! write after memory - ", (uint64_t)__ptr, "\n");
+		safe_print_with_hex_val(FREE_PFX "error! write after memory - ", (uint64_t)__ptr, "\n");
 		__THROW_ERROR__;
 	}
 
@@ -623,7 +617,7 @@ void *realloc(void *__ptr, size_t __size) throw() {
 	mem_hdr* m = (mem_hdr*)prefix;
 
 	if (m->magic_num != MAGIC_NUM) {
-		safe_print_with_val("realloc: error! bad ptr given - ", (uint64_t)__ptr, "\n");
+		safe_print_with_hex_val(MEM_DEBUG_NAME "realloc: error! bad ptr given - ", (uint64_t)__ptr, "\n");
 		__THROW_ERROR__;
 	}
 
@@ -741,7 +735,7 @@ void mem_debug_check(const char* file, const int line, const char* user_msg, con
 
 // check validity of a single pointer (this code is very similar to the checks performed in 'free')
 void mem_debug_check_ptr(const void* __ptr) {
-#define MEM_DEBUG_CHK_PTR_PFX "%p: error: "
+#define MEM_DEBUG_CHK_PTR_PFX MEM_DEBUG_NAME "%p: error: "
 	bool err = false;
 
 	// Find pointer to prefix just below the user buffer.
@@ -794,7 +788,7 @@ void mem_debug_check_ptr(const void* __ptr) {
 // is_global defines whether we clear all or only allocations performed by this thread.
 // restart_serial_nums also resets all allocations' serial numbers, and restarts assignment from 0.
 void mem_debug_clear_leak_list(bool is_global, bool restart_serial_nums) {
-	MD_LOG_INFO("Clearing leak table%s.\n", is_global? "":" (this thread only)");
+	MD_LOG_INFO(MEM_DEBUG_NAME "Clearing leak table%s.\n", is_global? "":" (this thread only)");
 
 	mutex_lock();
 	mem_hdr* m = mem_hdr_base.next;
@@ -845,11 +839,11 @@ bool mem_debug_show_leak_list(bool is_global) {
 	}
 	mutex_unlock();
 	if (!leaks_detected) {
-		MD_LOG_INFO("No memory leaks detected.\n");
+		MD_LOG_INFO(MEM_DEBUG_NAME "No memory leaks detected.\n");
 		return false;
 	}
 
-	MD_LOG_INFO("Memory leak summary%s:\n", is_global? "":" (this thread only)");
+	MD_LOG_INFO(MEM_DEBUG_NAME "Memory leak summary%s:\n", is_global? "":" (this thread only)");
 	mutex_lock();
 	m = mem_hdr_base.next;
 	while (m) {
@@ -932,16 +926,19 @@ uint64_t mem_debug_total_alloced_bytes(bool include_padding, bool get_peak, bool
 		}
 	}
 	else {
-#ifdef ENABLE_CPP11
+		uint64_t ret = 0;
 		if (get_peak) {
-			return (include_padding? thread_bytes_alloced_w_padding_max : thread_bytes_alloced_max);
+			ret = (include_padding? thread_bytes_alloced_w_padding_max : thread_bytes_alloced_max);
 		}
 		else {
-			return (include_padding? thread_bytes_alloced_w_padding : thread_bytes_alloced);
+			mutex_lock();
+			if (thread_specific_info_valid) {
+				ThreadSpecificInfo &th = (*thread_specific_info)[get_thread_id()];
+				ret = (include_padding? th.thread_bytes_alloced_w_padding : th.thread_bytes_alloced);
+			}
+			mutex_unlock();
 		}
-#else
-		return 0;
-#endif
+		return ret;
 	}
 }
 
@@ -950,11 +947,19 @@ uint64_t mem_debug_total_mallocs(bool is_global, bool outstanding_only) {
 		return (outstanding_only? num_global_allocs : global_num_times_malloc_called);
 	}
 	else {
-#ifdef ENABLE_CPP11
-		return (outstanding_only? num_thread_allocs : thread_num_times_malloc_called);
-#else
-		return 0;
-#endif
+		uint64_t ret = 0;
+		if (outstanding_only) {
+			mutex_lock();
+			if (thread_specific_info_valid) {
+				ThreadSpecificInfo &th = (*thread_specific_info)[get_thread_id()];
+				ret = th.num_thread_allocs;
+			}
+			mutex_unlock();
+		}
+		else {
+			ret = thread_num_times_malloc_called;
+		}
+		return ret;
 	}
 }
 

@@ -1,5 +1,12 @@
 MEM_debug Release Notes
 -----------------------
+v1.0.9, 20190513
+----------------
+* Changed method to store thread-specific statistics, which was causing mutex recursion errors. Now uses std::map, with a simple custom allocator to bypass mem_debug's own allocations. This eliminates the c++11 requirement, so removed the check.
+* added safe_print_dec() to print decimal numbers.
+* added "MEM_debug" prefix to user error messages.
+* changed MemDebugInfo to not use printf when printing the startup banner.
+
 v1.0.8, 20190512
 ----------------
 * added mem_debug_total_mallocs.

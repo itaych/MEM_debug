@@ -4,14 +4,14 @@ MEM_debug is a simple, effective and easy to use heap corruption and memory leak
 
 A major advantage to MEM_debug is that, as opposed to most other solutions, there is no need to recompile any of your existing code to enable it; in fact, it will even work when linking against existing libraries. And, as opposed to [Valgrind](http://valgrind.org/) the impact on performance is minimal to negligible.
 ## Platforms
-MEM_debug has been tested on C and C++ projects compiled with GCC under Linux, targeting both Intel and ARM processors.
+MEM_debug has been tested on very large (>500,000 lines) complex, multithreaded C and C++ projects compiled with GCC under Linux, targeting both Intel and ARM processors.
 I’m not sure about other platforms and compilers but glibc is a minimum requirement due to the method used to intercept heap management calls. I’ve had no luck with MacOS or MinGW.
 
 For Windows developers, MS Visual Studio offers similar debugging capabilities in its CRT library (see [here](https://docs.microsoft.com/en-us/visualstudio/debugger/crt-debug-heap-details?view=vs-2015) and [here](https://docs.microsoft.com/en-us/visualstudio/debugger/finding-memory-leaks-using-the-crt-library?view=vs-2015)), so this tool wouldn’t be of much help there anyway.
 
 If anyone manages to use MEM_debug on a new platform (perhaps with minor modifications) please let me know.
 ## Setup
-1. Add the files MEM_debug.cpp and MEM_debug.h from this repository to your project, or to one of the shared libs in your project. MEM_debug.cpp should preferably be built with C++11 (or higher) enabled for best results.
+1. Add the files MEM_debug.cpp and MEM_debug.h from this repository to your project, or to one of the shared libs in your project.
 2. There is no step 2. Enjoy!
 ## How it Works
 In glibc, heap management functions such as malloc and free are defined as weak symbols, which means they can be overridden by the application or a shared library. After being overridden, the original functions are still accessible via alternate names (\_\_libc_malloc, \_\_libc_free, etc.) so it’s easy to intercept heap functions without needing to completely rewrite them. MEM_debug wraps every allocation with padding bytes before and after the buffer returned to the user, as well as a bookkeeping structure that keeps track of all allocations. The integrity of these wrappings is tested when freeing a buffer, or on demand. The bookkeeping also allows testing for memory leaks.
