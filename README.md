@@ -11,7 +11,7 @@ For Windows developers, MS Visual Studio offers similar debugging capabilities i
 
 If anyone manages to use MEM_debug on a new platform (perhaps with minor modifications) please let me know.
 ## Setup
-1. Add the files MEM_debug.cpp and MEM_debug.h from this repository to your project, or to one of the shared libs in your project.
+1. Add the files MEM_debug.cpp and MEM_debug.h from this repository to your project, or to one of the shared libs in your project. *(Note: the present release, 1.0.9, must be built with c++11 enabled. If this is an issue for you please revert to 1.0.8.)*
 2. There is no step 2. Enjoy!
 ## How it Works
 In glibc, heap management functions such as malloc and free are defined as weak symbols, which means they can be overridden by the application or a shared library. After being overridden, the original functions are still accessible via alternate names (\_\_libc_malloc, \_\_libc_free, etc.) so it’s easy to intercept heap functions without needing to completely rewrite them. MEM_debug wraps every allocation with padding bytes before and after the buffer returned to the user, as well as a bookkeeping structure that keeps track of all allocations. The integrity of these wrappings is tested when freeing a buffer, or on demand. The bookkeeping also allows testing for memory leaks.
@@ -29,7 +29,7 @@ The first line is always shown at program start and is intended to let you know 
 
 The last line is automatically output at program exit. It indicates the result of a full heap test. It shows the peak memory use over the lifetime of the process, the total amount of times 'malloc' and 'free' were called, and finally how many outstanding allocations exist and how many bytes remain allocated at program exit. The ‘padded’ values indicate the amount of memory actually allocated, which is higher than what the program requested because it includes the memory allocated for the padding and bookkeeping.
 
-(I actually don't know why a program that does nothing reports two unfreed allocations at exit. This is a known issue and I don't know its cause.)
+*(I actually don't know why a program that does nothing reports two unfreed allocations at exit. This is a known issue and I don't know its cause.)*
 
 Now, let's add an allocation without freeing it: `char* buf = (char*)malloc(10);`
 
