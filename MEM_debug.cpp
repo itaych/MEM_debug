@@ -153,6 +153,8 @@ struct ThreadSpecificInfo {
 template<typename _Tp> class libc_allocator : public std::allocator<_Tp> {
 public:
 	template<typename _Tp1> struct rebind { typedef libc_allocator<_Tp1> other; };
+	libc_allocator() throw() {}
+	template <typename _Tp1> libc_allocator (const libc_allocator<_Tp1>&) throw() {}
 	_Tp* allocate(size_t __n, const void* unused = 0) {
 		return static_cast<_Tp*>(__libc_malloc(__n * sizeof(_Tp)));
 	}
@@ -160,7 +162,7 @@ public:
 		__libc_free(__p);
 	}
 };
-typedef std::map<long int, ThreadSpecificInfo, std::less<int>, libc_allocator<std::pair<const long int, ThreadSpecificInfo>>> ThreadSpecificInfoMap;
+typedef std::map<long int, ThreadSpecificInfo, std::less<int>, libc_allocator<std::pair<const long int, ThreadSpecificInfo> > > ThreadSpecificInfoMap;
 static ThreadSpecificInfoMap *thread_specific_info; // Map cannot be a static object, as it may not be initialized at first memory allocation.
 static bool thread_specific_info_valid = false;
 
