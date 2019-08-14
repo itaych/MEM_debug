@@ -65,7 +65,7 @@ freely, subject to the following restrictions:
 #include <map>
 
 #define MEM_DEBUG_NAME "MEM_debug "
-#define MEM_DEBUG_VERSION "1.0.9"
+#define MEM_DEBUG_VERSION "1.0.10"
 
 // Optimize an 'if' for the most likely case
 #ifdef __GNUC__
@@ -716,10 +716,11 @@ void mem_debug_check(const char* file, const int line, const char* user_msg, con
 		m = m->next;
 	}
 
+	const int expected_num_allocs = num_global_allocs; // read global number of allocs in critical section
 	mutex_unlock();
 
-	if (num_allocs != num_global_allocs) {
-		MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "wrong num allocs (at %p, num=%d expected=%d)\n", file, line, user_msg, prev_m, num_allocs, num_global_allocs);
+	if (num_allocs != expected_num_allocs) {
+		MD_LOG_ERROR(MEM_DEBUG_CHK_PFX "wrong num allocs (at %p, num=%d expected=%d)\n", file, line, user_msg, prev_m, num_allocs, expected_num_allocs);
 		__THROW_ERROR__;
 	}
 
