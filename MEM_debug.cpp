@@ -65,7 +65,7 @@ freely, subject to the following restrictions:
 #include <map>
 
 #define MEM_DEBUG_NAME "MEM_debug "
-#define MEM_DEBUG_VERSION "1.0.10"
+#define MEM_DEBUG_VERSION "1.0.11"
 
 // Optimize an 'if' for the most likely case
 #ifdef __GNUC__
@@ -566,16 +566,17 @@ void free(void *__ptr) throw() {
 }
 
 // Overriding implementations of posix_memalign, memalign, valloc, malloc, calloc, realloc - fairly simple, making use of functions defined above.
+// (only memalign seemed to require the extern "C", but added it for all of them just in case.)
 // Thanks to stackoverflow user Andreas Grapentin for the idea; see his explanation at:
 // http://stackoverflow.com/questions/17803456/an-alternative-for-the-deprecated-malloc-hook-functionality-of-glibc
 
-int posix_memalign(void **memptr, size_t alignment, size_t size) throw() {
+extern "C" int posix_memalign(void **memptr, size_t alignment, size_t size) throw() {
 	// We could have directly implemented memory allocation here, but something in the way posix_memalign is declared breaks stack traces
 	// in some scenarios. So we avoid it as much as possible (unless the application calls posix_memalign directly).
 	return mem_debug_posix_memalign(memptr, alignment, size);
 }
 
-void *memalign(size_t boundary, size_t size) throw() {
+extern "C" void *memalign(size_t boundary, size_t size) throw() {
 	void* memptr;
 	if (mem_debug_posix_memalign(&memptr, boundary, size)) {
 		return NULL;
@@ -583,15 +584,15 @@ void *memalign(size_t boundary, size_t size) throw() {
 	return memptr;
 }
 
-void *valloc(size_t size) throw() {
+extern "C" void *valloc(size_t size) throw() {
 	return memalign(sysconf(_SC_PAGESIZE),size);
 }
 
-void *malloc(size_t __size) throw() {
+extern "C" void *malloc(size_t __size) throw() {
 	return memalign(0x10, __size);
 }
 
-void *calloc(size_t __nmemb, size_t __size) throw() {
+extern "C" void *calloc(size_t __nmemb, size_t __size) throw() {
 	size_t sz = __nmemb * __size;
 	uint8_t* ret = (uint8_t*)malloc(sz);
 	if (ret) {
@@ -600,7 +601,7 @@ void *calloc(size_t __nmemb, size_t __size) throw() {
 	return ret;
 }
 
-void *realloc(void *__ptr, size_t __size) throw() {
+extern "C" void *realloc(void *__ptr, size_t __size) throw() {
 	if (__ptr == NULL) {
 		return malloc(__size); // realloc(NULL, size) is like malloc(size)
 	}
