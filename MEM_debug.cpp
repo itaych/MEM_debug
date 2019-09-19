@@ -39,6 +39,8 @@ freely, subject to the following restrictions:
 #define PAD_FREEMEM_CHAR 0xcd
 // Fail on any single allocation request larger than this size. This catches unintentional huge allocations but increase this value if desired.
 #define MAX_ALLOC 0x18000000 // 384 MB
+// File descriptor to which error messages shall be output. Recommended values are STDOUT_FILENO or STDERR_FILENO.
+#define ERROR_OUT_FD STDOUT_FILENO
 // By default, diagnostic functions output messages using printf, but if you use some framework that supports log levels you may
 // employ it by changing these defines.
 #define MD_LOG_INFO printf
@@ -183,7 +185,7 @@ static inline void void_write (int __fd, __const void *__buf, size_t __n) {
 }
 
 // some 'safe' print functions, so we don't call printf within alloc/free
-static void safe_print_string(const char* str, const int fd = STDERR_FILENO) {
+static void safe_print_string(const char* str, const int fd = ERROR_OUT_FD) {
 	const char* str_p = str;
 	while (*str_p) {
 		str_p++;
@@ -191,7 +193,7 @@ static void safe_print_string(const char* str, const int fd = STDERR_FILENO) {
 	void_write(fd, str, str_p-str);
 }
 
-static void safe_print_string_escaped(const char* str, const int fd = STDERR_FILENO) {
+static void safe_print_string_escaped(const char* str, const int fd = ERROR_OUT_FD) {
 	while (*str) {
 		if (*str == '\t') safe_print_string("\\t");
 		else if (*str == '\n') safe_print_string("\\n");
@@ -201,7 +203,7 @@ static void safe_print_string_escaped(const char* str, const int fd = STDERR_FIL
 	}
 }
 
-static void safe_print_hex(uint64_t val, const int fd = STDERR_FILENO) {
+static void safe_print_hex(uint64_t val, const int fd = ERROR_OUT_FD) {
 	char digits[19]; // 0x + 16 digits + null terminator
 	char* current = digits + sizeof(digits);
 	*--current = '\0';
@@ -221,7 +223,7 @@ static void safe_print_hex(uint64_t val, const int fd = STDERR_FILENO) {
 	safe_print_string(current);
 }
 
-static void safe_print_dec(uint64_t val, const int fd = STDERR_FILENO) {
+static void safe_print_dec(uint64_t val, const int fd = ERROR_OUT_FD) {
 	char digits[21]; // 20 digits + null terminator
 	char* current = digits + sizeof(digits);
 	*--current = '\0';
@@ -232,13 +234,13 @@ static void safe_print_dec(uint64_t val, const int fd = STDERR_FILENO) {
 	safe_print_string(current);
 }
 
-static void safe_print_with_hex_val(const char* str1, uint64_t val, const char* str2, const int fd = STDERR_FILENO) {
+static void safe_print_with_hex_val(const char* str1, uint64_t val, const char* str2, const int fd = ERROR_OUT_FD) {
 	safe_print_string(str1, fd);
 	safe_print_hex(val, fd);
 	safe_print_string(str2, fd);
 }
 
-static void safe_print_with_dec_val(const char* str1, uint64_t val, const char* str2, const int fd = STDERR_FILENO) {
+static void safe_print_with_dec_val(const char* str1, uint64_t val, const char* str2, const int fd = ERROR_OUT_FD) {
 	safe_print_string(str1, fd);
 	safe_print_dec(val, fd);
 	safe_print_string(str2, fd);
