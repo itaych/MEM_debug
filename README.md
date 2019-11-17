@@ -81,11 +81,11 @@ The technique for finding the location of a memory corruption is simple: scatter
 
 The memory checking macro has two additional variants: MEM_DEBUG_CHECK_MSG allows you to specify a custom message that will be shown with the results of that check; MEM_DEBUG_THREAD_CHECK tests only buffers allocated by the current thread, so that in a multithreaded scenario, the thread that halts on an error will (most likely) be the thread responsible for it.
 
-If you don’t want to check the entire heap you may check just a single allocation; this is particularly useful if the corruption always happens to the same allocated buffer and you want to minimize the performance impact of the error checking. To do this call the function mem_debug_check_ptr on the problematic buffer. (C++ users note: this and all other functions are in the ‘mem_debug’ namespace.)
+If you don’t want to check the entire heap you may check just a single allocation; this is particularly useful if the corruption always happens to the same allocated buffer and you want to minimize the performance impact of the error checking. To do this call the function mem_debug::check_ptr on the problematic buffer. (For C users the equivalent function call is mem_debug_check_ptr.)
 ### Leak Detection
 MEM_debug allows you to define a code section that will be tested for leaks; when the code completes, it will output a list of all allocations that were performed within the section but not freed. The method of operation is simple: every allocation in the system is marked with a ‘leak’ flag, set to true when allocating. When entering the problematic code section, all leak flags are cleared. When exiting the code section, any allocation now marked as a ‘leak’ must have been allocated within that section but not freed.
 
-Before the code section to be tested, call function mem_debug_clear_leak_list(). After the code section call mem_debug_show_leak_list() and view the results. Here is an example:
+Before the code section to be tested, call function mem_debug::clear_leak_list(). After the code section call mem_debug::show_leak_list() and view the results. Here is an example:
 ```
 T10986 #0 (G#0): @0x954d070 size 0xa, content: 00 00 00 00 00 00 00 00 00 00
 ```
@@ -97,13 +97,15 @@ From left to right, this is the information displayed:
 - The size of the buffer.
 - The first few bytes of the contents of the buffer. (Strings will be shown as text.)
 
-If this information isn’t enough to pinpoint the leak, check if the serial number of the offending leak is consistent between runs. If it is, you can tell MEM_debug to halt the program on that specific allocation number with mem_debug_abort_on_allocation() and find the offending line in the stack trace.
+If this information isn’t enough to pinpoint the leak, check if the serial number of the offending leak is consistent between runs. If it is, you can tell MEM_debug to halt the program on that specific allocation number with mem_debug::abort_on_allocation() and find the offending line in the stack trace.
 
 When debugging a multithreaded program, it is possible to isolate the check to the current thread only, to prevent concurrent allocations from other threads affecting the results. See the MEM_debug.h file for specific instructions on how to do this.
+### Memory Heap Size Limit
+Sometimes a program allocates an unexpectedly high amount of memory. MEM_debug can set a hard limit on the total heap size and catch the point at which that size limit is exceeded, allowing you to investigate the cause of the allocation. See mem_debug::set_memory_limit().
 ## Tweaks
 MEM_debug should work well as is, but a few settings can be modified to help solve your particular issue. The modifiable settings are defined at the beginning of the MEM_debug.cpp file.
 
-- MEM_DEBUG_FILL_ALLOCED_MEMORY - enable this definition to fill every allocated buffer with a set pattern. This helps catch use of uninitialized memory.
+- MEM_DEBUG_FILL_ALLOCED_MEMORY - enable this definition to fill every allocated buffer with a set pattern before returning it. This helps catch use of uninitialized memory.
 - MEM_DEBUG_FILL_FREED_MEMORY - enable this to fill every freed buffer with a set pattern. This helps catch attempts to use memory that has recently been freed.
 - PREFIX_SIZE and SUFFIX_SIZE - set the size of the padding used for protecting against out of bounds memory writes. The default should be enough for off-by-one or other minor errors, but can be changed if desired.
 - PAD_CHAR - this is the byte used to fill the memory padding, or the entire buffer if MEM_DEBUG_FILL_ALLOCED_MEMORY is set.
