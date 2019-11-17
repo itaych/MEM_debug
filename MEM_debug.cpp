@@ -65,9 +65,10 @@ freely, subject to the following restrictions:
 #include <sys/time.h>
 #include <sys/syscall.h>
 #include <map>
+#include <limits>
 
 #define MEM_DEBUG_NAME "MEM_debug "
-#define MEM_DEBUG_VERSION "1.0.11"
+#define MEM_DEBUG_VERSION "1.0.12"
 
 // Optimize an 'if' for the most likely case
 #ifdef __GNUC__
@@ -131,6 +132,7 @@ static uint64_t global_bytes_alloced_max = 0; // peak total memory allocated (no
 static uint64_t global_bytes_alloced_w_padding_max = 0; // peak total memory allocated (including padding)
 static __thread uint64_t thread_bytes_alloced_max = 0; // peak thread memory allocated (not including padding)
 static __thread uint64_t thread_bytes_alloced_w_padding_max = 0; // peak thread memory allocated (including padding)
+static uint64_t global_bytes_alloced_limit = std::numeric_limits<uint64_t>::max(); // memory usage limit, unlimited by default
 
 static size_t max_align = 0; // highest alignment request seen.
 static uint32_t alloc_serial_num = 0; // serial number of next allocation (process-wide)
@@ -456,6 +458,15 @@ static int mem_debug_posix_memalign(void **memptr, size_t alignment, size_t size
 	num_global_allocs++;
 	mutex_unlock();
 
+	// check that we haven't allocated more than user defined memory limit
+	if (global_bytes_alloced > global_bytes_alloced_limit) {
+		safe_print_with_dec_val(MALLOC_PFX "current alloc is ", size, " bytes, ");
+		safe_print_with_dec_val("total is ", global_bytes_alloced, ", ");
+		safe_print_with_dec_val("which is beyond limit of ", global_bytes_alloced_limit, ", aborting\n");
+		global_bytes_alloced_limit = std::numeric_limits<uint64_t>::max(); // handling the abort may require more allocations, prevent them from failing.
+		__THROW_ERROR__;
+	}
+
 	// return allocated, aligned buffer to user.
 	*memptr = ptr;
 	return 0;
@@ -740,7 +751,7 @@ void mem_debug_check(const char* file, const int line, const char* user_msg, con
 }
 
 // check validity of a single pointer (this code is very similar to the checks performed in 'free')
-void mem_debug_check_ptr(const void* __ptr) {
+void check_ptr(const void* __ptr) {
 #define MEM_DEBUG_CHK_PTR_PFX MEM_DEBUG_NAME "%p: error: "
 	bool err = false;
 
@@ -793,7 +804,7 @@ void mem_debug_check_ptr(const void* __ptr) {
 // Before performing a memory leak check, clear 'leak' flag from all allocations.
 // is_global defines whether we clear all or only allocations performed by this thread.
 // restart_serial_nums also resets all allocations' serial numbers, and restarts assignment from 0.
-void mem_debug_clear_leak_list(bool is_global, bool restart_serial_nums) {
+void clear_leak_list(bool is_global, bool restart_serial_nums) {
 	MD_LOG_INFO(MEM_DEBUG_NAME "Clearing leak table%s.\n", is_global? "":" (this thread only)");
 
 	mutex_lock();
@@ -825,10 +836,10 @@ void mem_debug_clear_leak_list(bool is_global, bool restart_serial_nums) {
 	mutex_unlock();
 }
 
-// Display a list of all memory allocated but not freed since last mem_debug_clear_leak_list (or program start).
+// Display a list of all memory allocated but not freed since last mem_debug::clear_leak_list (or program start).
 // is_global defines whether all allocations are shown, or only those performed by the current thread.
 // returns false if no leaks detected, true if leaks detected.
-bool mem_debug_show_leak_list(bool is_global) {
+bool show_leak_list(bool is_global) {
 #define CONTENT_DUMP_MAX_SIZE 64
 #define MAX_OUT_STR 1024
 	char out_str[MAX_OUT_STR];
@@ -911,7 +922,7 @@ bool mem_debug_show_leak_list(bool is_global) {
 	return true;
 }
 
-void mem_debug_abort_on_allocation(unsigned int serial_num, unsigned int size, bool is_global) {
+void abort_on_allocation(unsigned int serial_num, unsigned int size, bool is_global) {
 	if (is_global) {
 		abort_on_global_serial_num = serial_num;
 		abort_on_size_global = size;
@@ -922,7 +933,7 @@ void mem_debug_abort_on_allocation(unsigned int serial_num, unsigned int size, b
 	}
 }
 
-uint64_t mem_debug_total_alloced_bytes(bool include_padding, bool get_peak, bool is_global) {
+uint64_t get_total_alloced_bytes(bool include_padding, bool get_peak, bool is_global) {
 	if (is_global) {
 		if (get_peak) {
 			return (include_padding? global_bytes_alloced_w_padding_max : global_bytes_alloced_max);
@@ -948,7 +959,7 @@ uint64_t mem_debug_total_alloced_bytes(bool include_padding, bool get_peak, bool
 	}
 }
 
-uint64_t mem_debug_total_mallocs(bool is_global, bool outstanding_only) {
+uint64_t get_total_mallocs(bool is_global, bool outstanding_only) {
 	if (is_global) {
 		return (outstanding_only? num_global_allocs : global_num_times_malloc_called);
 	}
@@ -969,6 +980,10 @@ uint64_t mem_debug_total_mallocs(bool is_global, bool outstanding_only) {
 	}
 }
 
+void set_memory_limit(uint64_t max_usage) {
+	global_bytes_alloced_limit = max_usage;
+}
+
 } // namespace
 
 /* C interface */
@@ -980,27 +995,31 @@ void mem_debug_check(const char* file, const int line, const char* user_msg, con
 }
 
 void mem_debug_check_ptr(const void* ptr) {
-	mem_debug::mem_debug_check_ptr(ptr);
+	mem_debug::check_ptr(ptr);
 }
 
 void mem_debug_clear_leak_list(int bool_is_global, int bool_restart_serial_nums) {
-	mem_debug::mem_debug_clear_leak_list((bool)bool_is_global, (bool)bool_restart_serial_nums);
+	mem_debug::clear_leak_list((bool)bool_is_global, (bool)bool_restart_serial_nums);
 }
 
 int mem_debug_show_leak_list(int bool_is_global) {
-	return (int)mem_debug::mem_debug_show_leak_list((bool)bool_is_global);
+	return (int)mem_debug::show_leak_list((bool)bool_is_global);
 }
 
 void mem_debug_abort_on_allocation(unsigned int serial_num, unsigned int size, int bool_is_global) {
-	mem_debug::mem_debug_abort_on_allocation(serial_num, size, (bool)bool_is_global);
+	mem_debug::abort_on_allocation(serial_num, size, (bool)bool_is_global);
 }
 
-uint64_t mem_debug_total_alloced_bytes(int bool_include_padding, int get_peak, int is_global) {
-	return mem_debug::mem_debug_total_alloced_bytes((bool)bool_include_padding, (bool)get_peak, (bool)is_global);
+uint64_t mem_debug_get_total_alloced_bytes(int bool_include_padding, int get_peak, int is_global) {
+	return mem_debug::get_total_alloced_bytes((bool)bool_include_padding, (bool)get_peak, (bool)is_global);
 }
 
-uint64_t mem_debug_total_mallocs(int is_global, int outstanding_only) {
-	return mem_debug::mem_debug_total_mallocs((bool)is_global, (bool)outstanding_only);
+uint64_t mem_debug_get_total_mallocs(int is_global, int outstanding_only) {
+	return mem_debug::get_total_mallocs((bool)is_global, (bool)outstanding_only);
+}
+
+void mem_debug_set_memory_limit(uint64_t max_usage) {
+	mem_debug::set_memory_limit(max_usage);
 }
 
 }
