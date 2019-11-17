@@ -65,10 +65,9 @@ freely, subject to the following restrictions:
 #include <sys/time.h>
 #include <sys/syscall.h>
 #include <map>
-#include <limits>
 
 #define MEM_DEBUG_NAME "MEM_debug "
-#define MEM_DEBUG_VERSION "1.0.12"
+#define MEM_DEBUG_VERSION "1.0.13"
 
 // Optimize an 'if' for the most likely case
 #ifdef __GNUC__
@@ -132,7 +131,7 @@ static uint64_t global_bytes_alloced_max = 0; // peak total memory allocated (no
 static uint64_t global_bytes_alloced_w_padding_max = 0; // peak total memory allocated (including padding)
 static __thread uint64_t thread_bytes_alloced_max = 0; // peak thread memory allocated (not including padding)
 static __thread uint64_t thread_bytes_alloced_w_padding_max = 0; // peak thread memory allocated (including padding)
-static uint64_t global_bytes_alloced_limit = std::numeric_limits<uint64_t>::max(); // memory usage limit, unlimited by default
+static uint64_t global_bytes_alloced_limit = 0; // memory usage limit, 0 (unlimited) by default
 
 static size_t max_align = 0; // highest alignment request seen.
 static uint32_t alloc_serial_num = 0; // serial number of next allocation (process-wide)
@@ -459,11 +458,11 @@ static int mem_debug_posix_memalign(void **memptr, size_t alignment, size_t size
 	mutex_unlock();
 
 	// check that we haven't allocated more than user defined memory limit
-	if (global_bytes_alloced > global_bytes_alloced_limit) {
+	if (global_bytes_alloced_limit > 0 && global_bytes_alloced > global_bytes_alloced_limit) {
 		safe_print_with_dec_val(MALLOC_PFX "current alloc is ", size, " bytes, ");
 		safe_print_with_dec_val("total is ", global_bytes_alloced, ", ");
 		safe_print_with_dec_val("which is beyond limit of ", global_bytes_alloced_limit, ", aborting\n");
-		global_bytes_alloced_limit = std::numeric_limits<uint64_t>::max(); // handling the abort may require more allocations, prevent them from failing.
+		global_bytes_alloced_limit = 0; // handling the abort may require more allocations, prevent them from failing.
 		__THROW_ERROR__;
 	}
 

@@ -77,7 +77,7 @@ uint64_t get_total_alloced_bytes(bool include_padding = false, bool get_peak = f
 uint64_t get_total_mallocs(bool is_global = true, bool outstanding_only = true);
 
 // Set an upper bound on memory usage. Any attempt to allocate memory such that the total heap usage grows beyond max_usage will fail.
-// This does not count the padding and bookkeeping used by MEM_debug itself.
+// This does not count the padding and bookkeeping used by MEM_debug itself. Set to 0 to disable.
 void set_memory_limit(uint64_t max_usage);
 
 #else
