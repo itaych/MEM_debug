@@ -1,5 +1,25 @@
 MEM_debug Release Notes
 -----------------------
+v1.0.13, 20191117
+----------------
+* Initializing global_bytes_alloced_limit with std::numeric_limits<uint64_t>::max() didn't work in some cases, switched to 0 as the default value.
+
+v1.0.12, 20191117
+----------------
+* Removed "mem_debug" prefix from most API functions, as the namespace
+already covers that for C++. C API is unchanged.
+* Added function set_memory_limit to set an upper bound on the total
+amount of memory allocated from the heap. This can help debug cases
+where your heap usage grows unexpectedly.
+
+v1.0.11, 20190919
+----------------
+* due to missing extern "C" declaration, memalign was not intercepted. Added missing declaration to memalign and all other intercepted functions for consistency.
+
+v1.0.10, 20190814
+----------------
+* fixed a race condition in mem_debug_check: num_global_allocs was read outside of critical section.
+
 v1.0.9, 20190514
 ----------------
 * Changed method to store thread-specific statistics, which was causing mutex recursion errors. Now uses std::map, with a simple custom allocator to bypass mem_debug's own allocations. This eliminates the c++11 requirement, so removed the check.
