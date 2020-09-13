@@ -1,7 +1,7 @@
 /*
 MEM_debug, a heap corruption and memory leak detector.
 
-Copyright (c)2019 Itay Chamiel, itaych@gmail.com
+Copyright (c)2020 Itay Chamiel, itaych@gmail.com
 
 This software is provided 'as-is', without any express or implied
 warranty. In no event will the authors be held liable for any damages
@@ -289,7 +289,7 @@ static char* hdr_info(const struct mem_hdr* hdr, bool show_extra_info = false) {
 		strftime(ts_str, sizeof(ts_str), "%b %e %X.", &currtime);
 		// add to output
 		snprintf(hdr_info_output+strlen(hdr_info_output), sizeof(hdr_info_output)-strlen(hdr_info_output),
-    		" (Now: %s%03d thread %d)",
+				" (Now: %s%03d thread %d)",
 				ts_str, (int)(now_ts.tv_usec/1000), (int)get_thread_id());
 	}
 	return hdr_info_output;
