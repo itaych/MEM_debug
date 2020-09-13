@@ -268,18 +268,17 @@ struct MemDebugInfo {
 static MemDebugInfo memdebuginfo;
 
 // Get thread and timestamp from memory header and create human readable output.
-#define TIME2STR_SZ 100
-static __thread char hdr_info_output[TIME2STR_SZ];
+static __thread char hdr_info_output[0x100];
 static char* hdr_info(const struct mem_hdr* hdr, bool show_extra_info = false) {
 	struct tm currtime;
 
 	// convert mem TS to string
 	localtime_r(&hdr->timestamp.tv_sec, &currtime); // local time
-	char ts_str[TIME2STR_SZ];
-	strftime(ts_str, TIME2STR_SZ, "%b %e %X.", &currtime);
+	char ts_str[32];
+	strftime(ts_str, sizeof(ts_str), "%b %e %X.", &currtime);
 
 	// generate output
-	snprintf(hdr_info_output, TIME2STR_SZ, "Allocated at %s%03d by thread %d size %u",
+	snprintf(hdr_info_output, sizeof(hdr_info_output), "Allocated at %s%03d by thread %d size %u",
 			ts_str, (int)(hdr->timestamp.tv_usec/1000), (int)hdr->allocator_thread, hdr->requested_size);
 
 	if (show_extra_info) { // add info on current time and thread.
@@ -287,9 +286,10 @@ static char* hdr_info(const struct mem_hdr* hdr, bool show_extra_info = false) {
 		timeval now_ts;
 		gettimeofday(&now_ts, NULL);
 		localtime_r(&now_ts.tv_sec, &currtime); // local time
-		strftime(ts_str, TIME2STR_SZ, "%b %e %X.", &currtime);
+		strftime(ts_str, sizeof(ts_str), "%b %e %X.", &currtime);
 		// add to output
-		snprintf(hdr_info_output+strlen(hdr_info_output), TIME2STR_SZ, " (Now: %s%03d thread %d)",
+		snprintf(hdr_info_output+strlen(hdr_info_output), sizeof(hdr_info_output)-strlen(hdr_info_output),
+    		" (Now: %s%03d thread %d)",
 				ts_str, (int)(now_ts.tv_usec/1000), (int)get_thread_id());
 	}
 	return hdr_info_output;
