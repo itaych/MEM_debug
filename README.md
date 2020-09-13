@@ -15,8 +15,8 @@ If anyone manages to use MEM_debug on a new platform (perhaps with minor modific
 2. Build and run as usual. Enjoy!
 ## Wait, what?
 Really, that's all that's needed to get it to work. Another option however is to preload MEM_debug as a shared library, allowing you to unobtrusively debug an existing executable. To do this:
-1. Compile the shared library with `g++ MEM_debug.cpp -shared -fPIC -o MEM_debug.so`
-2. Test your executable with `LD_PRELOAD=/path/to/MEM_debug.so my_executable`
+1. Build the shared library with `g++ MEM_debug.cpp -shared -fPIC -o MEM_debug.so`
+2. Test your executable with `LD_PRELOAD=/full/path/to/MEM_debug.so my_executable`
 
 With this, everything detailed below will work except for the Advanced Features section.
 ## How it Works
