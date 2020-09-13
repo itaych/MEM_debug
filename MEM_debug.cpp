@@ -67,7 +67,7 @@ freely, subject to the following restrictions:
 #include <map>
 
 #define MEM_DEBUG_NAME "MEM_debug "
-#define MEM_DEBUG_VERSION "1.0.13"
+#define MEM_DEBUG_VERSION "1.0.14"
 
 // Optimize an 'if' for the most likely case
 #ifdef __GNUC__
