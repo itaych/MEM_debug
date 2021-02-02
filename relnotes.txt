@@ -1,5 +1,14 @@
 MEM_debug Release Notes
 -----------------------
+v1.0.15, 20210202
+-----------------
+Added get_largest_thread to return the TID and size (allocated memory) of the thread that has allocated the most memory. In some cases this can be useful to trace a growing memory leak.
+Support aligned_alloc (thanks @horde3d).
+
+v1.0.14, 20200913
+-----------------
+Fixed some string overflow warnings that occurred since g++ 8.
+
 v1.0.13, 20191117
 -----------------
 * Initializing global_bytes_alloced_limit with std::numeric_limits<uint64_t>::max() didn't work in some cases, switched to 0 as the default value.
