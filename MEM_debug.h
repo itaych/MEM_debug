@@ -80,6 +80,9 @@ uint64_t get_total_mallocs(bool is_global = true, bool outstanding_only = true);
 // This does not count the padding and bookkeeping used by MEM_debug itself. Set to 0 to disable.
 void set_memory_limit(uint64_t max_usage);
 
+// Finds thread which has allocated the highest proportion of currently allocated memory and returns its TID and the amount of memory it has allocated.
+void get_largest_thread(int* tid, uint64_t* alloc_size);
+
 #else
 static inline void mem_debug_check(const char* file, const int line, const char* user_msg = NULL, const bool this_thread_only = false) {}
 static inline void check_ptr(const void* ptr) {}
@@ -89,6 +92,7 @@ static inline void abort_on_allocation(unsigned int serial_num, unsigned int siz
 static inline uint64_t get_total_alloced_bytes(bool include_padding = false, bool get_peak = false, bool is_global = true) { return 0; }
 static inline uint64_t get_total_mallocs(bool is_global = true, bool outstanding_only = true) { return 0; }
 static inline void set_memory_limit(uint64_t max_usage) {}
+static inline void get_largest_thread(int* tid, uint64_t* alloc_size) {}
 #define MEM_DEBUG_CHECK
 #define MEM_DEBUG_CHECK_MSG(msg)
 #define MEM_DEBUG_THREAD_CHECK(msg)
@@ -116,6 +120,7 @@ void mem_debug_abort_on_allocation(unsigned int serial_num, unsigned int size, i
 uint64_t mem_debug_get_total_alloced_bytes(int bool_include_padding, int get_peak, int is_global);
 uint64_t mem_debug_get_total_mallocs(int is_global, int outstanding_only);
 void mem_debug_set_memory_limit(uint64_t max_usage);
+void mem_debug_get_largest_thread(int* tid, uint64_t* alloc_size);
 #else
 static inline void mem_debug_check(const char* file, const int line, const char* user_msg, const int bool_this_thread_only) {}
 static inline void mem_debug_check_ptr(const void* ptr) {}
@@ -125,6 +130,7 @@ static inline void mem_debug_abort_on_allocation(unsigned int serial_num, unsign
 static inline uint64_t mem_debug_get_total_alloced_bytes(int bool_include_padding, int get_peak, int is_global) { return 0; }
 static inline uint64_t mem_debug_get_total_mallocs(int is_global, int outstanding_only) { return 0; }
 static inline void mem_debug_set_memory_limit(uint64_t max_usage) {}
+static inline void mem_debug_get_largest_thread(int* tid, uint64_t* alloc_size) {}
 #define MEM_DEBUG_CHECK
 #define MEM_DEBUG_CHECK_MSG(msg)
 #define MEM_DEBUG_THREAD_CHECK(msg)

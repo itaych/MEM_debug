@@ -67,7 +67,7 @@ freely, subject to the following restrictions:
 #include <map>
 
 #define MEM_DEBUG_NAME "MEM_debug "
-#define MEM_DEBUG_VERSION "1.0.14"
+#define MEM_DEBUG_VERSION "1.0.15"
 
 // Optimize an 'if' for the most likely case
 #ifdef __GNUC__
@@ -577,7 +577,7 @@ void free(void *__ptr) throw() {
 	__libc_free(prefix);
 }
 
-// Overriding implementations of posix_memalign, memalign, valloc, malloc, calloc, realloc - fairly simple, making use of functions defined above.
+// Overriding implementations of posix_memalign, memalign, aligned_alloc, valloc, malloc, calloc, realloc - fairly simple, making use of functions defined above.
 // (only memalign seemed to require the extern "C", but added it for all of them just in case.)
 // Thanks to stackoverflow user Andreas Grapentin for the idea; see his explanation at:
 // http://stackoverflow.com/questions/17803456/an-alternative-for-the-deprecated-malloc-hook-functionality-of-glibc
@@ -594,6 +594,10 @@ extern "C" void *memalign(size_t boundary, size_t size) throw() {
 		return NULL;
 	}
 	return memptr;
+}
+
+extern "C" void *aligned_alloc(size_t __alignment, size_t __size) throw() {
+	return memalign(__alignment, __size);
 }
 
 extern "C" void *valloc(size_t size) throw() {
@@ -958,6 +962,26 @@ uint64_t get_total_alloced_bytes(bool include_padding, bool get_peak, bool is_gl
 	}
 }
 
+void get_largest_thread(int* tid, uint64_t* alloc_size) {
+	if (!thread_specific_info_valid) return;
+	long int max_tid = -1;
+	uint64_t max_alloc = 0;
+	mutex_lock();
+	for (ThreadSpecificInfoMap::iterator it = thread_specific_info->begin(); it != thread_specific_info->end(); it++) {
+		if (it->second.thread_bytes_alloced > max_alloc) {
+			max_tid = it->first;
+			max_alloc = it->second.thread_bytes_alloced;
+		}
+	}
+	mutex_unlock();
+	if (tid) {
+		*tid = max_tid;
+	}
+	if (alloc_size) {
+		*alloc_size = max_alloc;
+	}
+}
+
 uint64_t get_total_mallocs(bool is_global, bool outstanding_only) {
 	if (is_global) {
 		return (outstanding_only? num_global_allocs : global_num_times_malloc_called);
@@ -1019,6 +1043,10 @@ uint64_t mem_debug_get_total_mallocs(int is_global, int outstanding_only) {
 
 void mem_debug_set_memory_limit(uint64_t max_usage) {
 	mem_debug::set_memory_limit(max_usage);
+}
+
+void mem_debug_get_largest_thread(int* tid, uint64_t* alloc_size) {
+	mem_debug::get_largest_thread(tid, alloc_size);
 }
 
 }

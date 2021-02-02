@@ -22,7 +22,7 @@ With this, everything detailed below will work except for the Advanced Features 
 ## How it Works
 In glibc, heap management functions such as malloc and free are defined as weak symbols, which means they can be overridden by the application or a shared library. After being overridden, the original functions are still accessible via alternate names (\_\_libc_malloc, \_\_libc_free, etc.) so it’s easy to intercept heap functions without needing to completely rewrite them. MEM_debug wraps every allocation with padding bytes before and after the buffer returned to the user, as well as a bookkeeping structure that keeps track of all allocations. The integrity of these wrappings is tested when freeing a buffer, or on demand. The bookkeeping also allows testing for memory leaks.
 
-The functions overridden are: malloc, calloc, valloc, realloc, memalign, posix_memalign, free. Note that ‘new’ and ‘delete’ internally call malloc and free so are covered as well.
+The functions overridden are: malloc, calloc, valloc, realloc, memalign, aligned_alloc, posix_memalign, free. Note that ‘new’ and ‘delete’ internally call malloc and free so are covered as well.
 ## Basic Usage
 If you’ve followed the Setup instructions, you will notice that your program now outputs some extra information to the standard output. Suppose we have a program that does nothing in its main() other than call `printf("hello world!\n");`. The program's output will now look like this:
 ```
