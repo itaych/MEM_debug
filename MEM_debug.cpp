@@ -65,9 +65,10 @@ freely, subject to the following restrictions:
 #include <sys/time.h>
 #include <sys/syscall.h>
 #include <map>
+#include <new>
 
 #define MEM_DEBUG_NAME "MEM_debug "
-#define MEM_DEBUG_VERSION "1.0.15"
+#define MEM_DEBUG_VERSION "1.0.16"
 
 // Optimize an 'if' for the most likely case
 #ifdef __GNUC__
@@ -166,8 +167,12 @@ public:
 	}
 };
 typedef std::map<long int, ThreadSpecificInfo, std::less<int>, libc_allocator<std::pair<const long int, ThreadSpecificInfo> > > ThreadSpecificInfoMap;
-static ThreadSpecificInfoMap *thread_specific_info; // Map cannot be a static object, as it may not be initialized at first memory allocation.
-static bool thread_specific_info_valid = false;
+// This map cannot be a static object, as it may not be initialized at first memory allocation, so only allocate space for it.
+uint64_t thread_specific_info_map_space[sizeof(ThreadSpecificInfoMap)/sizeof(uint64_t)+1]; // uint64_t to force alignment, +1 because division my cause a too small size
+// Create the map during the first memory allocation and set this pointer.
+static ThreadSpecificInfoMap *thread_specific_info = nullptr;
+// ensure that map is created only once (for a clean shutdown sequence)
+bool thread_specific_info_created = false;
 
 // compare memory to constant byte. returns true iff all bytes in memory are equal to val.
 // by stackoverflow user mihaif. http://stackoverflow.com/a/28563801/3779334
@@ -253,6 +258,33 @@ static long int get_thread_id() {
 	return thread_id;
 }
 
+// Critical section mutex.
+static pthread_mutex_t alloc_mutex;
+static bool is_alloc_mutex_inited = false;
+static __thread bool is_mutex_owned = false; // catch malloc double lock within the same thread
+static inline void mutex_lock() {
+	if (UNLIKELY(!is_alloc_mutex_inited)) {
+		pthread_mutex_init(&alloc_mutex, NULL);
+		is_alloc_mutex_inited = true;
+	}
+	if (UNLIKELY(is_mutex_owned)) {
+		safe_print_with_dec_val(MEM_DEBUG_NAME "Mutex double lock from thread ", (uint64_t)get_thread_id(), "!\n");
+		pthread_mutex_unlock(&alloc_mutex);
+		is_mutex_owned = false;
+		__THROW_ERROR__;
+	}
+	pthread_mutex_lock(&alloc_mutex);
+	is_mutex_owned = true;
+}
+static inline void mutex_unlock() {
+	if (UNLIKELY(!is_mutex_owned)) {
+		safe_print_string(MEM_DEBUG_NAME "Mutex invalid unlock!\n");
+		__THROW_ERROR__;
+	}
+	pthread_mutex_unlock(&alloc_mutex);
+	is_mutex_owned = false;
+}
+
 // Dummy object that announces memory checker at startup and runs final check at shutdown.
 struct MemDebugInfo {
 	MemDebugInfo() { safe_print_with_dec_val("** (", getpid(), ") " MEM_DEBUG_NAME MEM_DEBUG_VERSION " is active.\n"); }
@@ -263,6 +295,13 @@ struct MemDebugInfo {
 				(unsigned long long)global_bytes_alloced_max, (unsigned long long)global_bytes_alloced_w_padding_max,
 				(unsigned long long)global_num_times_malloc_called, (unsigned long long)global_num_times_free_called);
 		mem_debug::mem_debug_check(__FILE__, __LINE__, msg);
+		// Since we're shutting down, use this opportunity to delete thread_specific_info map
+		mutex_lock();
+		if (thread_specific_info) {
+			thread_specific_info->~ThreadSpecificInfoMap();
+			thread_specific_info = nullptr;
+		}
+		mutex_unlock();
 	}
 };
 static MemDebugInfo memdebuginfo;
@@ -293,33 +332,6 @@ static char* hdr_info(const struct mem_hdr* hdr, bool show_extra_info = false) {
 				ts_str, (int)(now_ts.tv_usec/1000), (int)get_thread_id());
 	}
 	return hdr_info_output;
-}
-
-// Critical section mutex.
-static pthread_mutex_t alloc_mutex;
-static bool is_alloc_mutex_inited = false;
-static __thread bool is_mutex_owned = false; // catch malloc double lock within the same thread
-static inline void mutex_lock() {
-	if (UNLIKELY(!is_alloc_mutex_inited)) {
-		pthread_mutex_init(&alloc_mutex, NULL);
-		is_alloc_mutex_inited = true;
-	}
-	if (UNLIKELY(is_mutex_owned)) {
-		safe_print_with_dec_val(MEM_DEBUG_NAME "Mutex double lock from thread ", (uint64_t)get_thread_id(), "!\n");
-		pthread_mutex_unlock(&alloc_mutex);
-		is_mutex_owned = false;
-		__THROW_ERROR__;
-	}
-	pthread_mutex_lock(&alloc_mutex);
-	is_mutex_owned = true;
-}
-static inline void mutex_unlock() {
-	if (UNLIKELY(!is_mutex_owned)) {
-		safe_print_string(MEM_DEBUG_NAME "Mutex invalid unlock!\n");
-		__THROW_ERROR__;
-	}
-	pthread_mutex_unlock(&alloc_mutex);
-	is_mutex_owned = false;
 }
 
 // allocate aligned memory. Other allocators call this function.
@@ -436,19 +448,22 @@ static int mem_debug_posix_memalign(void **memptr, size_t alignment, size_t size
 		global_bytes_alloced_w_padding_max = global_bytes_alloced_w_padding;
 	}
 
-	// create thread statistics map here, and set global pointer to this object.
-	static ThreadSpecificInfoMap thread_specific_info_map;
-	thread_specific_info = &thread_specific_info_map;
-	thread_specific_info_valid = true;
+	// create thread statistics map
+	if (!thread_specific_info_created) {
+		thread_specific_info = new((void*)thread_specific_info_map_space) ThreadSpecificInfoMap(); // "placement new" creates an object in preallocated memory
+		thread_specific_info_created = true;
+	}
 
 	// update thread specific statistics
-	ThreadSpecificInfo &th = (*thread_specific_info)[thread_id];
-	th.num_thread_allocs++;
-	th.thread_bytes_alloced += size;
-	th.thread_bytes_alloced_w_padding += total_alloc_size;
-	if (th.thread_bytes_alloced > thread_bytes_alloced_max) {
-		thread_bytes_alloced_max = th.thread_bytes_alloced;
-		thread_bytes_alloced_w_padding_max = th.thread_bytes_alloced_w_padding;
+	if (thread_specific_info) { // this pointer is reset in ~MemDebugInfo() so we must check it here
+		ThreadSpecificInfo &th = (*thread_specific_info)[thread_id];
+		th.num_thread_allocs++;
+		th.thread_bytes_alloced += size;
+		th.thread_bytes_alloced_w_padding += total_alloc_size;
+		if (th.thread_bytes_alloced > thread_bytes_alloced_max) {
+			thread_bytes_alloced_max = th.thread_bytes_alloced;
+			thread_bytes_alloced_w_padding_max = th.thread_bytes_alloced_w_padding;
+		}
 	}
 
 	m->checksum = m->calc_checksum();
@@ -537,18 +552,20 @@ void free(void *__ptr) throw() {
 		global_bytes_alloced_w_padding -= m->total_alloc_size;
 
 		// update thread specific statistics
-		ThreadSpecificInfo &th = (*thread_specific_info)[m->allocator_thread];
-		th.num_thread_allocs--;
-		th.thread_bytes_alloced -= m->requested_size;
-		th.thread_bytes_alloced_w_padding -= m->total_alloc_size;
-		if (th.num_thread_allocs <= 0) {
-			if (th.thread_bytes_alloced != 0) {
-				safe_print_with_dec_val(FREE_PFX "Internal inconsistency for thread ", (uint64_t)m->allocator_thread, ", ");
-				safe_print_with_dec_val("there are ", th.thread_bytes_alloced, " bytes allocated when should be 0!\n");
-				mutex_unlock();
-				__THROW_ERROR__;
+		if (thread_specific_info) { // this pointer is set in mem_debug_posix_memalign but reset in ~MemDebugInfo() so we must check it here
+			ThreadSpecificInfo &th = (*thread_specific_info)[m->allocator_thread];
+			th.num_thread_allocs--;
+			th.thread_bytes_alloced -= m->requested_size;
+			th.thread_bytes_alloced_w_padding -= m->total_alloc_size;
+			if (th.num_thread_allocs <= 0) {
+				if (th.thread_bytes_alloced != 0) {
+					safe_print_with_dec_val(FREE_PFX "Internal inconsistency for thread ", (uint64_t)m->allocator_thread, ", ");
+					safe_print_with_dec_val("there are ", th.thread_bytes_alloced, " bytes allocated when should be 0!\n");
+					mutex_unlock();
+					__THROW_ERROR__;
+				}
+				thread_specific_info->erase(m->allocator_thread); // delete info for this thread, since all blocks have been freed.
 			}
-			thread_specific_info->erase(m->allocator_thread); // delete info for this thread, since all blocks have been freed.
 		}
 
 		global_num_times_free_called++;
@@ -952,7 +969,7 @@ uint64_t get_total_alloced_bytes(bool include_padding, bool get_peak, bool is_gl
 		}
 		else {
 			mutex_lock();
-			if (thread_specific_info_valid) {
+			if (thread_specific_info) {
 				ThreadSpecificInfo &th = (*thread_specific_info)[get_thread_id()];
 				ret = (include_padding? th.thread_bytes_alloced_w_padding : th.thread_bytes_alloced);
 			}
@@ -963,7 +980,7 @@ uint64_t get_total_alloced_bytes(bool include_padding, bool get_peak, bool is_gl
 }
 
 void get_largest_thread(int* tid, uint64_t* alloc_size) {
-	if (!thread_specific_info_valid) return;
+	if (!thread_specific_info) return;
 	long int max_tid = -1;
 	uint64_t max_alloc = 0;
 	mutex_lock();
@@ -990,7 +1007,7 @@ uint64_t get_total_mallocs(bool is_global, bool outstanding_only) {
 		uint64_t ret = 0;
 		if (outstanding_only) {
 			mutex_lock();
-			if (thread_specific_info_valid) {
+			if (thread_specific_info) {
 				ThreadSpecificInfo &th = (*thread_specific_info)[get_thread_id()];
 				ret = th.num_thread_allocs;
 			}
