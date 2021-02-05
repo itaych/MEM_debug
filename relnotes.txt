@@ -1,5 +1,9 @@
 MEM_debug Release Notes
 -----------------------
+v1.0.16, 20210205
+-----------------
+Fixed potential crash during shutdown.
+
 v1.0.15, 20210202
 -----------------
 Added get_largest_thread to return the TID and size (allocated memory) of the thread that has allocated the most memory. In some cases this can be useful to trace a growing memory leak.
