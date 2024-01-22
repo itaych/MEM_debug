@@ -88,7 +88,7 @@ freely, subject to the following restrictions:
 // these are aliases to the original glibc malloc/free functions.
 extern "C" void *__libc_malloc(size_t size);
 extern "C" void __libc_free(void *__ptr);
-// extern "C" void *__libc_memalign (size_t alignment, size_t size);
+// extern "C" void *__libc_memalign(size_t alignment, size_t size);
 
 // magic numbers to ensure an allocation is real
 #define MAGIC_NUM 0x1ee76502
@@ -158,7 +158,7 @@ template<typename _Tp> class libc_allocator : public std::allocator<_Tp> {
 public:
 	template<typename _Tp1> struct rebind { typedef libc_allocator<_Tp1> other; };
 	libc_allocator() throw() {}
-	template <typename _Tp1> libc_allocator (const libc_allocator<_Tp1>&) throw() {}
+	template <typename _Tp1> libc_allocator(const libc_allocator<_Tp1>&) throw() {}
 	_Tp* allocate(size_t __n, const void* unused = 0) {
 		return static_cast<_Tp*>(__libc_malloc(__n * sizeof(_Tp)));
 	}
@@ -168,7 +168,7 @@ public:
 };
 typedef std::map<long int, ThreadSpecificInfo, std::less<int>, libc_allocator<std::pair<const long int, ThreadSpecificInfo> > > ThreadSpecificInfoMap;
 // This map cannot be a static object, as it may not be initialized at first memory allocation, so only allocate space for it.
-uint64_t thread_specific_info_map_space[sizeof(ThreadSpecificInfoMap)/sizeof(uint64_t)+1]; // uint64_t to force alignment, +1 because division my cause a too small size
+uint64_t thread_specific_info_map_space[sizeof(ThreadSpecificInfoMap)/sizeof(uint64_t)+1]; // uint64_t to force alignment, +1 because division may cause a too small size
 // Create the map during the first memory allocation and set this pointer.
 static ThreadSpecificInfoMap *thread_specific_info = nullptr;
 // ensure that map is created only once (for a clean shutdown sequence)
@@ -185,7 +185,7 @@ static inline bool memvcmp(const void *memory, const unsigned char val, const un
 }
 
 // a version of 'write' that ignores the return value (we don't expect errors when writing to stderr).
-static inline void void_write (int __fd, __const void *__buf, size_t __n) {
+static inline void void_write(int __fd, __const void *__buf, size_t __n) {
 	size_t ret = write(__fd, __buf, __n);
 	((void)ret);
 }
@@ -1066,6 +1066,6 @@ void mem_debug_get_largest_thread(int* tid, uint64_t* alloc_size) {
 	mem_debug::get_largest_thread(tid, alloc_size);
 }
 
-}
+} // extern "C"
 
 #endif // MEM_DEBUG_ENABLE
